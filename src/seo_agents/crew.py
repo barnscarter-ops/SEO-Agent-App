@@ -562,6 +562,9 @@ def archive_used_photos(schedule_path: Path, photo_dir: Path) -> list[str]:
     today = date.today().isoformat()
     archived: list[str] = []
 
+    # Track which used_photos were matched to a manifest row
+    matched: set[str] = set()
+
     for row in rows:
         target_path = Path(row.get("Target", ""))
         filename = target_path.name
@@ -573,6 +576,23 @@ def archive_used_photos(schedule_path: Path, photo_dir: Path) -> list[str]:
             if src.exists():
                 shutil.move(str(src), str(dst))
                 archived.append(filename)
+            matched.add(filename)
+
+    # Handle untracked photos (exist in directory, used in schedule, not in manifest)
+    for filename in used_photos - matched:
+        src = photo_dir / filename
+        if src.exists():
+            dst = archive_dir / filename
+            shutil.move(str(src), str(dst))
+            archived.append(filename)
+            # Add a new manifest entry for traceability
+            rows.append({
+                "Topic": filename,
+                "Source": str(photo_dir / filename),
+                "Target": str(photo_dir / filename),
+                "Status": "used",
+                "UsedDate": today,
+            })
 
     # Write manifest back
     with manifest_path.open("w", newline="", encoding="utf-8") as f:

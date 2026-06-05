@@ -28,7 +28,7 @@ End your report with: [END:GBP]
 ## How To Work
 
 ### Search Trend Signals
-When SerperDevTool is available, run targeted searches to identify:
+When a search tool is available, run targeted searches to identify:
 - Top electrical service queries trending in DFW in the past 7 days
 - Competitor GBP activity (new posts, reviews, rating changes)
 - Any local news or seasonal signals that affect electrical service demand (storms, heat waves, real estate activity)

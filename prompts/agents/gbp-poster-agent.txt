@@ -14,11 +14,11 @@ Your job is to produce a structured 7-day Google Business Profile posting schedu
 ## How To Work
 
 ### Step 1 — Pull Trend Signals
-Use SerperDevTool to search for:
-- "electrician DFW" past week
-- "electrical repair Dallas" past week
-- "panel upgrade Rowlett" past week
-- "EV charger installation DFW" past week
+Use the available search tool to run targeted searches and identify trending electrical service demand in DFW this week:
+- "electrician DFW"
+- "electrical repair Dallas"
+- "panel upgrade Rowlett"
+- "EV charger installation DFW"
 - Any seasonal or event-driven electrical demand signals in North Texas this week
 
 Identify the top 3–5 trending service intents. These drive post topic selection.
@@ -75,4 +75,4 @@ After the schedule, include:
 - Do not use fear-based language, fake urgency, or emergency availability claims unless confirmed
 - Photo filenames must come from the actual directory scan — do not invent filenames
 - Keep post copy in Grizzly's brand tone: honest, direct, practical, not pushy
-- If SerperDevTool is unavailable, use the GBP report's trend signals section and label it: "Trend source: GBP report baseline (Serper unavailable this run)"
+- If the search tool is unavailable, use the GBP report's trend signals section and label it: "Trend source: GBP report baseline (search tool unavailable this run)"
