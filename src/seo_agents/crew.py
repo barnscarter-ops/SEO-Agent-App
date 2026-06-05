@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import csv
 import os
+import shutil
+from datetime import date, datetime
 from pathlib import Path
 
 from crewai import Agent, Crew, LLM, Process, Task
@@ -475,9 +478,100 @@ def build_executor_crew() -> Crew:
     )
 
 
-# ---------------------------------------------------------------------------
-# GBP Poster Crew  (seo-agents post-schedule)
-# ---------------------------------------------------------------------------
+def _read_manifest(manifest_path: Path) -> tuple[list[str], list[dict]]:
+    """
+    Read the photo manifest CSV.
+    Returns (fieldnames, rows).
+    """
+    if not manifest_path.exists():
+        return ["Topic", "Source", "Target", "Status", "UsedDate"], []
+    with manifest_path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or ["Topic", "Source", "Target", "Status"])
+        rows = list(reader)
+    if "UsedDate" not in fieldnames:
+        fieldnames.append("UsedDate")
+    return fieldnames, rows
+
+
+def _available_photos(photo_dir: Path, manifest_path: Path) -> list[str]:
+    """
+    Return filenames in photo_dir that are NOT yet marked used/archived in the manifest.
+    Falls back to full directory scan if manifest is absent.
+    """
+    used_names: set[str] = set()
+    if manifest_path.exists():
+        _, rows = _read_manifest(manifest_path)
+        for row in rows:
+            status = row.get("Status", "").strip().lower()
+            if status in {"used", "archived", "posted"}:
+                target = Path(row.get("Target", ""))
+                used_names.add(target.name)
+
+    image_exts = {".jpg", ".jpeg", ".png", ".webp", ".JPG", ".JPEG", ".PNG", ".WEBP"}
+    available = [
+        p.name for p in sorted(photo_dir.iterdir())
+        if p.suffix in image_exts and p.name not in used_names
+    ]
+    return available
+
+
+def archive_used_photos(schedule_path: Path, photo_dir: Path) -> list[str]:
+    """
+    After the poster crew runs:
+    1. Parse the schedule for PHOTO_FILE entries
+    2. Mark those photos as 'used' in the manifest with today's date
+    3. Move the files to Archive/YYYY-MM/ to free local space
+    Returns list of archived filenames.
+    """
+    if not schedule_path.exists():
+        return []
+
+    schedule_text = schedule_path.read_text(encoding="utf-8", errors="replace")
+
+    # Extract PHOTO_FILE entries from schedule
+    used_photos: set[str] = set()
+    for line in schedule_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("PHOTO_FILE:"):
+            filename = stripped.replace("PHOTO_FILE:", "").strip()
+            if filename and not filename.upper().startswith("NEEDS PHOTO"):
+                used_photos.add(filename)
+
+    if not used_photos:
+        return []
+
+    manifest_path = photo_dir / "gbp-photo-manifest.csv"
+    fieldnames, rows = _read_manifest(manifest_path)
+
+    # Archive destination
+    month_str = datetime.today().strftime("%Y-%m")
+    archive_dir = photo_dir / "Archive" / month_str
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    today = date.today().isoformat()
+    archived: list[str] = []
+
+    for row in rows:
+        target_path = Path(row.get("Target", ""))
+        filename = target_path.name
+        if filename in used_photos:
+            row["Status"] = "used"
+            row["UsedDate"] = today
+            src = photo_dir / filename
+            dst = archive_dir / filename
+            if src.exists():
+                shutil.move(str(src), str(dst))
+                archived.append(filename)
+
+    # Write manifest back
+    with manifest_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return archived
+
 
 def build_poster_crew(
     start_date: str = "",
@@ -485,29 +579,45 @@ def build_poster_crew(
 ) -> Crew:
     """
     Separate daily crew. Reads content + GBP reports, pulls live trend signals,
-    scans the local photo directory, and produces a 7-day GBP posting schedule.
+    scans the local photo directory (filtering manifest for unused photos),
+    and produces a 7-day GBP posting schedule.
     """
     exec_llm = build_exec_llm()
 
-    photo_path = os.getenv("GBP_PHOTO_PATH", r"C:\Grizzly\Media\GBP Post Photos")
+    photo_path = os.getenv("GBP_PHOTO_PATH", r"C:\Workspace\Shared\Assets\Media\Grizzly\GBP Post Photos")
     photo_dir = Path(photo_path)
+    manifest_path = photo_dir / "gbp-photo-manifest.csv"
 
-    # Scan local photos
+    # Manifest-aware photo scan — exclude already used/archived
     if photo_dir.exists():
-        photo_files = sorted(
-            p.name for p in photo_dir.iterdir()
-            if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+        available = _available_photos(photo_dir, manifest_path)
+        used_count = sum(
+            1 for p in photo_dir.glob("gbp-photo-manifest.csv") if p.exists()
+        )  # just checking existence
+        # Count used from manifest for reporting
+        _, mrows = _read_manifest(manifest_path)
+        used_count = sum(
+            1 for r in mrows
+            if r.get("Status", "").strip().lower() in {"used", "archived", "posted"}
         )
-        photo_list = "\n".join(photo_files) if photo_files else "No photos found in directory."
+        photo_list = "\n".join(available) if available else "No unused photos available."
+        photo_summary = f"{len(available)} available, {used_count} already used/archived"
     else:
+        available = []
         photo_list = f"Photo directory not found: {photo_path}"
+        photo_summary = "directory missing"
 
     content_report = read_output("content_report.md")
     gbp_report = read_output("gbp_report.md")
 
     poster_context = (
-        f"GBP_PHOTO_PATH: {photo_path}\n\n"
-        f"AVAILABLE PHOTOS:\n{photo_list}\n\n"
+        f"GBP_PHOTO_PATH: {photo_path}\n"
+        f"MANIFEST: {manifest_path}\n"
+        f"PHOTO AVAILABILITY: {photo_summary}\n\n"
+        "AVAILABLE PHOTOS (not yet used — do NOT select any photo not in this list):\n"
+        f"{photo_list}\n\n"
+        "MANIFEST RULE: Only select photos from the AVAILABLE PHOTOS list above. "
+        "Photos already marked used/archived in the manifest are excluded and must not be reused.\n\n"
         f"START DATE: {start_date or 'Next business day'}\n"
         f"DAYS TO SCHEDULE: {days}\n\n"
         "CONTENT REPORT (research phase):\n\n"
@@ -520,7 +630,7 @@ def build_poster_crew(
 
     poster_agent = Agent(
         role="Grizzly GBP Poster Agent",
-        goal="Produce a structured 7-day GBP posting schedule based on trend signals, report context, and available photos.",
+        goal="Produce a structured 7-day GBP posting schedule using only available (unused) photos from the manifest.",
         backstory=agent_backstory("gbp-poster-agent.txt"),
         tools=tools,
         llm=exec_llm,
@@ -531,8 +641,9 @@ def build_poster_crew(
         description=(
             f"{poster_context}\n\n"
             "Use SerperDevTool to pull this week's trending electrical service queries in DFW. "
-            f"Build a {days}-day GBP posting schedule starting from the next business day. "
-            "Match each post to an available photo from the list above. "
+            f"Build a {days}-day GBP posting schedule starting from {start_date or 'the next business day'}. "
+            "CRITICAL: Only assign photos from the AVAILABLE PHOTOS list — never repeat a photo "
+            "already in the manifest with status used/archived/posted. "
             "Use the DAY/DATE/SERVICE/TOPIC/TREND_TIE/HEADLINE/BODY/CAPTION/PHOTO_FILE/CTA/STATUS format. "
             "All posts must have STATUS: Needs approval."
         ),

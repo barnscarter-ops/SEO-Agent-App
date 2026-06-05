@@ -13,6 +13,7 @@ from seo_agents.crew import (
     DEFAULT_SITE_URL,
     ARCHIVE_DIR,
     OUTPUT_DIR,
+    archive_used_photos,
     build_executor_crew,
     build_poster_crew,
     build_seo_crew,
@@ -171,7 +172,20 @@ def main() -> None:
         try:
             result = crew.kickoff()
             print(result)
-            print(f"\n✅ GBP posting schedule saved to: {OUTPUT_DIR / 'gbp_posting_schedule.md'}")
+            schedule_path = OUTPUT_DIR / "gbp_posting_schedule.md"
+            print(f"\n✅ GBP posting schedule saved to: {schedule_path}")
+            # Archive used photos and update manifest
+            photo_path = os.getenv(
+                "GBP_PHOTO_PATH",
+                r"C:\Workspace\Shared\Assets\Media\Grizzly\GBP Post Photos"
+            )
+            archived = archive_used_photos(schedule_path, Path(photo_path))
+            if archived:
+                print(f"📁 Archived {len(archived)} photo(s) to Archive folder and updated manifest:")
+                for f in archived:
+                    print(f"   - {f}")
+            else:
+                print("ℹ️  No photos to archive (NEEDS PHOTO entries or no matches in manifest).")
         except Exception as e:
             print(f"\n❌ GBP Poster crew failed: {e}")
             sys.exit(1)
