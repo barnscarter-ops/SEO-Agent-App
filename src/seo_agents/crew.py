@@ -7,7 +7,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from crewai import Agent, Crew, LLM, Process, Task
-from crewai_tools import ScrapeWebsiteTool, SerperDevTool
+from crewai_tools import ScrapeWebsiteTool, SerpApiGoogleSearchTool
 from dotenv import load_dotenv
 
 
@@ -58,14 +58,14 @@ def is_verbose() -> bool:
 
 
 def _serper_key_valid() -> bool:
-    key = os.getenv("SERPER_API_KEY", "").strip()
-    return bool(key) and key not in {"your-serper-key", "your_serper_key", "SERPER_KEY"}
+    key = os.getenv("SERPAPI_API_KEY", "").strip()
+    return bool(key) and key not in {"your-serper-key", "your_serper_key", "SERPER_KEY", "your-serpapi-key"}
 
 
 def build_tools() -> list:
     tools = [ScrapeWebsiteTool()]
     if _serper_key_valid():
-        tools.insert(0, SerperDevTool())
+        tools.insert(0, SerpApiGoogleSearchTool())
     return tools
 
 
