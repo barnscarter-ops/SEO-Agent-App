@@ -529,14 +529,24 @@ def archive_used_photos(schedule_path: Path, photo_dir: Path) -> list[str]:
 
     schedule_text = schedule_path.read_text(encoding="utf-8", errors="replace")
 
-    # Extract PHOTO_FILE entries from schedule
+    # Extract PHOTO_FILE entries from schedule — handle plain and markdown bold formats
     used_photos: set[str] = set()
-    for line in schedule_text.splitlines():
+    lines = schedule_text.splitlines()
+    for i, line in enumerate(lines):
         stripped = line.strip()
-        if stripped.startswith("PHOTO_FILE:"):
-            filename = stripped.replace("PHOTO_FILE:", "").strip()
-            if filename and not filename.upper().startswith("NEEDS PHOTO"):
-                used_photos.add(filename)
+        # Handle both "PHOTO_FILE: name" and "**PHOTO_FILE:** name" formats
+        if "PHOTO_FILE" in stripped and "NEEDS PHOTO" not in stripped.upper():
+            # Strip markdown bold markers
+            cleaned = stripped.replace("**", "").strip()
+            if cleaned.startswith("PHOTO_FILE:"):
+                filename = cleaned.replace("PHOTO_FILE:", "").strip()
+                # If filename is empty, the value may be on the next line
+                if not filename and i + 1 < len(lines):
+                    filename = lines[i + 1].strip().replace("**", "").strip()
+                # Strip trailing markdown (e.g. trailing spaces/backslash)
+                filename = filename.rstrip("\\ ")
+                if filename and not filename.upper().startswith("NEEDS PHOTO"):
+                    used_photos.add(filename)
 
     if not used_photos:
         return []

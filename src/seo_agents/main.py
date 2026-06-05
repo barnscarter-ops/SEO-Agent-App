@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -158,8 +159,10 @@ def main() -> None:
             sys.exit(1)
 
     elif command == "post-schedule":
+        # Default start_date to today so the agent doesn't hallucinate a date
+        start_date = getattr(args, "start_date", "") or date.today().isoformat()
         crew = build_poster_crew(
-            start_date=getattr(args, "start_date", ""),
+            start_date=start_date,
             days=getattr(args, "days", 7),
         )
         if args.dry_run:
