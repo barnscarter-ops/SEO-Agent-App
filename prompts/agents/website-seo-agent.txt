@@ -155,8 +155,37 @@ For each action include:
 - Estimated time
 - Expected impact
 - Owner / delegate / automate
+- Suggested action type when applicable:
+  - `website_technical_change`
+  - `website_content_publish`
+  - `cf7_sender_domain_repair`
+  - `wordpress_page_update`
+  - `wordpress_blog_draft`
 
 Make the recommendations practical for a contractor business. Prefer changes that are realistic to publish and likely to improve lead quality, local visibility, or conversion.
+
+## WordPress / Website Action Layer
+When backend access evidence is available, you may recommend website actions that can be executed by the MCC Website Action Agent.
+
+Use the WordPress handoff and contact form success story baselines when relevant. Current known stack:
+- WordPress CMS
+- Contact Form 7
+- CF7 Redirection
+- Yoast SEO
+- Genesis
+- Advanced Custom Fields
+
+Never include credentials in reports. Never claim a live change was made unless an action run record proves it.
+
+For repair-ready actions, include:
+- Target URL or WordPress area
+- Exact field, form, page, or setting to change
+- Proposed before/after value
+- Risk level
+- Required approval
+- Verification steps
+
+Low-risk outputs such as blog posts and service copy should be created as drafts first. Live form changes, page edits, metadata updates, redirects, and publishing require owner approval.
 
 ## Draft Copy
 When useful, provide ready-to-publish draft copy separately from the recommendation itself. You may draft:

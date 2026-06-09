@@ -1,0 +1,70 @@
+{
+  "site_id": "grizzly",
+  "site_name": "Grizzly Electrical Solutions",
+  "site_url": "https://www.grizzlyelectricaltx.com/",
+  "wp_login_url": "https://www.grizzlyelectricaltx.com/wp-login.php",
+  "wp_admin_url": "https://www.grizzlyelectricaltx.com/wp-admin/",
+  "public_contact_url": "https://www.grizzlyelectricaltx.com/contact-us/",
+  "public_contact_thank_you_url": "https://www.grizzlyelectricaltx.com/contact-us-thank-you/",
+  "credentials_policy": "Do not store WordPress credentials in repo files. Use an authenticated browser session or owner-provided runtime secrets.",
+  "approval_policy": {
+    "draft_content": "dry_run_allowed",
+    "live_form_changes": "approval_required",
+    "live_page_changes": "approval_required",
+    "publishing": "approval_required"
+  },
+  "wordpress": {
+    "admin_email_observed": "sfsadmin@surefirelocal.com",
+    "plugins_observed": [
+      "Contact Form 7",
+      "CF7 Redirection",
+      "Yoast SEO",
+      "Wordfence",
+      "Advanced Custom Fields",
+      "Genesis"
+    ]
+  },
+  "contact_forms": [
+    {
+      "name": "Contact Us",
+      "post_id": 626,
+      "shortcode": "[contact-form-7 id=\"ddf899f\" title=\"Contact Us\"]",
+      "public_locations": [
+        {
+          "url": "https://www.grizzlyelectricaltx.com/contact-us/",
+          "unit_tag": "wpcf7-f626-p194-o1"
+        }
+      ],
+      "fields": ["fname", "email", "phone", "message", "acceptance", "lead_source"],
+      "success_redirect": "https://www.grizzlyelectricaltx.com/contact-us-thank-you/"
+    },
+    {
+      "name": "Inquire",
+      "post_id": 40,
+      "shortcode": "[contact-form-7 id=\"1d8e49f\" title=\"Inquire\"]",
+      "public_locations": [
+        {
+          "url": "https://www.grizzlyelectricaltx.com/",
+          "unit_tag": "wpcf7-f40-o1"
+        },
+        {
+          "url": "https://www.grizzlyelectricaltx.com/contact-us/",
+          "unit_tag": "wpcf7-f40-o2"
+        }
+      ],
+      "fields": ["fname", "phone", "email", "message", "acceptance", "lead_source"]
+    }
+  ],
+  "known_safe_repairs": [
+    {
+      "action_type": "cf7_sender_domain_repair",
+      "description": "Replace non-domain Contact Form 7 sender addresses with wordpress@grizzlyelectricaltx.com and preserve Reply-To headers.",
+      "requires_approval": true,
+      "verification": [
+        "Contact Form 7 list shows no configuration errors.",
+        "Public form redirects to thank-you page.",
+        "Owner confirms lead email delivery."
+      ]
+    }
+  ]
+}

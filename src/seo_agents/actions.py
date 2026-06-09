@@ -28,6 +28,18 @@ GBP_BROWSER_SESSION_DIR = Path(os.getenv(
     "GBP_BROWSER_SESSION_DIR",
     r"C:\Users\carte\.claude\gbp-session",
 ))
+WORDPRESS_SITE_CONFIG = Path(os.getenv(
+    "WORDPRESS_SITE_CONFIG",
+    r"C:\Workspace\Active\SEO-Agents-App\config\wordpress-sites\grizzly.json",
+))
+WORDPRESS_ACTION_ADAPTER = os.getenv(
+    "WORDPRESS_ACTION_ADAPTER",
+    r"C:\Workspace\Active\SEO-Agents-App\scripts\wordpress-action-adapter.mjs",
+).strip()
+WORDPRESS_BROWSER_SESSION_DIR = Path(os.getenv(
+    "WORDPRESS_BROWSER_SESSION_DIR",
+    r"C:\Workspace\Shared\Agents\BrowserSessions\grizzly-wordpress",
+))
 GBP_WORKBOOK_HEADERS = [
     "Date",
     "PostType",
@@ -103,7 +115,7 @@ def _extract_completion_blocks(text: str) -> dict[str, dict[str, str]]:
     parts = re.split(r"(?=^### COMPLETION REPORT)", body, flags=re.MULTILINE)
     completions: dict[str, dict[str, str]] = {}
     for part in parts:
-        task_id = re.search(r"^Task ID:\s*([A-Z]+-\d+)", part, flags=re.MULTILINE)
+        task_id = re.search(r"^Task ID:\s*([A-Z]+-?\d+)", part, flags=re.MULTILINE)
         if not task_id:
             continue
         completion: dict[str, str] = {"task_id": task_id.group(1)}
@@ -120,6 +132,33 @@ def _extract_completion_blocks(text: str) -> dict[str, dict[str, str]]:
             match = re.search(rf"^{re.escape(label)}:\s*(.+)", part, flags=re.MULTILINE)
             if match:
                 completion[key] = match.group(1).strip()
+        completions[completion["task_id"]] = completion
+    task_parts = re.split(r"(?=^## Task \d+:)", body, flags=re.MULTILINE)
+    for part in task_parts:
+        task_id = re.search(r"^### Task ID:\s*([A-Z]+-?\d+)", part, flags=re.MULTILINE)
+        if not task_id:
+            continue
+        completion = {"task_id": task_id.group(1)}
+        title = re.search(r"^## Task \d+:\s*(.+)", part, flags=re.MULTILINE)
+        if title:
+            completion["title"] = title.group(1).strip()
+        for label, key in (
+            ("Status", "completion_status"),
+            ("Definition of Done Met", "definition_of_done"),
+            ("Deliverable Location", "deliverable_location"),
+            ("If Partial or Blocked", "blocker"),
+            ("Owner Sign-Off Needed", "owner_signoff_needed"),
+        ):
+            match = re.search(rf"^### {re.escape(label)}:\s*(.+)", part, flags=re.MULTILINE)
+            if match:
+                completion[key] = match.group(1).strip()
+        action_match = re.search(
+            r"^### Action Taken:\s*\n(.*?)(?=^### |\n---|\Z)",
+            part,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        if action_match:
+            completion["action_taken"] = " ".join(action_match.group(1).split())
         completions[completion["task_id"]] = completion
     return completions
 
@@ -166,6 +205,8 @@ def _status_for_action(completion: dict[str, str], dependencies: list[str]) -> s
     status = completion.get("completion_status", "").upper()
     dependency_text = " ".join(dependencies).lower()
     blocker_text = completion.get("blocker", "").lower()
+    if status == "COMPLETE" and completion.get("definition_of_done", "").upper() == "YES":
+        return "dry_run_ready"
     if "access" in dependency_text or "access" in blocker_text or status == "BLOCKED":
         return "blocked_access"
     if completion.get("owner_signoff_needed", "").upper() == "YES":
@@ -191,6 +232,7 @@ def parse_execution_actions() -> list[dict[str, Any]]:
         verification = _extract_list_after(part, "Verification Checklist")
         completion = completions.get(task_id, {})
         action_type = _infer_action_type(executor, title, steps)
+        platform = _platform_for_action(action_type)
         actions.append({
             "id": f"task-{task_id.lower()}",
             "source": "execution_queue",
@@ -198,7 +240,7 @@ def parse_execution_actions() -> list[dict[str, Any]]:
             "title": title,
             "assigned_agent": executor,
             "action_type": action_type,
-            "platform": _platform_for_action(action_type),
+            "platform": platform,
             "risk": _risk_for_action(action_type),
             "status": _status_for_action(completion, dependencies),
             "priority": _extract_numbered_field(part, "Priority"),
@@ -208,7 +250,7 @@ def parse_execution_actions() -> list[dict[str, Any]]:
             "verification_checklist": verification,
             "completion": completion,
             "approval_required": completion.get("owner_signoff_needed", "").upper() == "YES" or bool(dependencies),
-            "live_adapter": None,
+            "live_adapter": "wordpress_browser" if platform == "website_cms" else None,
         })
     return actions
 
@@ -279,6 +321,7 @@ def _apply_approvals(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def build_action_queue() -> dict[str, Any]:
     actions = _apply_approvals([*parse_execution_actions(), *parse_gbp_post_actions()])
     adapters = {
+        "wordpress_browser": wordpress_adapter_status(),
         "google_business_profile": gbp_adapter_status(),
     }
     summary = {
@@ -338,6 +381,10 @@ def run_action(action_id: str, live: bool = False) -> dict[str, Any]:
         message = "GBP poster adapter completed." if command_result["exit_code"] == 0 else "GBP poster adapter failed."
         if live and command_result["exit_code"] == 0:
             _mark_gbp_workbook_posted(action)
+    elif action.get("live_adapter") == "wordpress_browser":
+        command_result = _run_wordpress_adapter(action, live=live)
+        result_status = "live_complete" if live and command_result["exit_code"] == 0 else "dry_run_complete" if command_result["exit_code"] == 0 else "adapter_failed"
+        message = "WordPress adapter completed." if command_result["exit_code"] == 0 else "WordPress adapter failed."
     elif live:
         result_status = "blocked_adapter"
         message = f"No live adapter configured for {action['platform']} yet."
@@ -360,6 +407,130 @@ def run_action(action_id: str, live: bool = False) -> dict[str, Any]:
     ACTION_RUN_DIR.mkdir(exist_ok=True)
     _write_json(ACTION_RUN_DIR / f"{run_record['id']}.json", run_record)
     return run_record
+
+
+def _load_wordpress_config() -> dict[str, Any]:
+    if not WORDPRESS_SITE_CONFIG.exists():
+        raise FileNotFoundError(f"WordPress site config not found: {WORDPRESS_SITE_CONFIG}")
+    return json.loads(WORDPRESS_SITE_CONFIG.read_text(encoding="utf-8"))
+
+
+def wordpress_adapter_status() -> dict[str, Any]:
+    status: dict[str, Any] = {
+        "name": "wordpress-browser",
+        "site_config": str(WORDPRESS_SITE_CONFIG),
+        "adapter": WORDPRESS_ACTION_ADAPTER or None,
+        "browser_session_dir": str(WORDPRESS_BROWSER_SESSION_DIR),
+        "state": "missing",
+        "config_ready": False,
+        "browser_session_ready": WORDPRESS_BROWSER_SESSION_DIR.exists(),
+        "live_adapter_ready": False,
+        "capabilities": [],
+        "missing": [],
+    }
+    if not WORDPRESS_SITE_CONFIG.exists():
+        status["missing"].append("WordPress site config")
+        return status
+    try:
+        config = _load_wordpress_config()
+    except Exception as error:
+        status["state"] = "error"
+        status["missing"].append(str(error))
+        return status
+    status["config_ready"] = True
+    status["site_id"] = config.get("site_id")
+    status["site_url"] = config.get("site_url")
+    status["wp_admin_url"] = config.get("wp_admin_url")
+    status["contact_forms"] = [
+        {"name": form.get("name"), "post_id": form.get("post_id")}
+        for form in config.get("contact_forms", [])
+    ]
+    status["capabilities"] = [
+        "wp_session_check",
+        "cf7_inventory",
+        "cf7_mail_settings_dry_run",
+        "public_form_submit_test",
+        "wordpress_page_update_draft",
+    ]
+    if WORDPRESS_ACTION_ADAPTER:
+        adapter_path = Path(WORDPRESS_ACTION_ADAPTER)
+        status["live_adapter_ready"] = adapter_path.exists()
+        if not adapter_path.exists():
+            status["missing"].append("WordPress action adapter script")
+    else:
+        status["missing"].append("WORDPRESS_ACTION_ADAPTER not configured")
+    if not status["browser_session_ready"]:
+        status["missing"].append("WordPress browser session directory")
+    if status["config_ready"] and status["live_adapter_ready"] and status["browser_session_ready"]:
+        status["state"] = "live_ready"
+    elif status["config_ready"]:
+        status["state"] = "approval_ready"
+    return status
+
+
+def _run_wordpress_adapter(action: dict[str, Any], live: bool) -> dict[str, Any]:
+    try:
+        config = _load_wordpress_config()
+    except Exception as error:
+        return {
+            "exit_code": 2,
+            "command": "wordpress-browser",
+            "stdout": "",
+            "stderr": str(error),
+        }
+    payload = {
+        "site": {
+            "site_id": config.get("site_id"),
+            "site_url": config.get("site_url"),
+            "wp_admin_url": config.get("wp_admin_url"),
+        },
+        "live": live,
+        "action": action,
+    }
+    if not live:
+        return {
+            "exit_code": 0,
+            "command": "wordpress-browser --dry-run",
+            "stdout": json.dumps(payload, indent=2),
+            "stderr": "",
+        }
+    if not WORDPRESS_ACTION_ADAPTER:
+        return {
+            "exit_code": 127,
+            "command": "wordpress-browser --live",
+            "stdout": "",
+            "stderr": "WORDPRESS_ACTION_ADAPTER is not configured yet.",
+        }
+    adapter_path = Path(WORDPRESS_ACTION_ADAPTER)
+    if not adapter_path.exists():
+        return {
+            "exit_code": 127,
+            "command": str(adapter_path),
+            "stdout": "",
+            "stderr": f"WordPress action adapter not found: {adapter_path}",
+        }
+    command = [
+        "node",
+        str(adapter_path),
+        "--config",
+        str(WORDPRESS_SITE_CONFIG),
+        "--payload",
+        json.dumps(payload),
+    ]
+    result = subprocess.run(
+        command,
+        cwd=str(adapter_path.parent),
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    return {
+        "exit_code": result.returncode,
+        "command": " ".join(command[:4]) + " --payload <json>",
+        "stdout": result.stdout.strip(),
+        "stderr": result.stderr.strip(),
+    }
 
 
 def _run_gbp_poster(action: dict[str, Any], live: bool) -> dict[str, Any]:

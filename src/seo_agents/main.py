@@ -12,8 +12,10 @@ from dotenv import load_dotenv
 from seo_agents.actions import (
     approve_action,
     format_action_queue_text,
+    gbp_adapter_status,
     run_action,
     sync_gbp_schedule_to_workbook,
+    wordpress_adapter_status,
     write_action_queue,
 )
 from seo_agents.crew import (
@@ -125,6 +127,12 @@ def parse_args() -> argparse.Namespace:
         help="Sync gbp_posting_schedule.md into the existing GBP poster workbook.",
     )
     sync_gbp.add_argument("--dry-run", action="store_true", help="Preview workbook rows without writing.")
+
+    adapter_status = subparsers.add_parser(
+        "adapter-status",
+        help="Show live-action adapter readiness for MCC and SEO execution agents.",
+    )
+    adapter_status.add_argument("--json", action="store_true", help="Print adapter status as JSON.")
 
     # Legacy: allow `seo-agents <topic>` as shorthand for `seo-agents research <topic>`
     parser.add_argument("topic", nargs="?", help=argparse.SUPPRESS)
@@ -328,6 +336,19 @@ def main() -> None:
         result = sync_gbp_schedule_to_workbook(dry_run=args.dry_run)
         print(json.dumps(result, indent=2))
 
+    elif command == "adapter-status":
+        result = {
+            "wordpress_browser": wordpress_adapter_status(),
+            "google_business_profile": gbp_adapter_status(),
+        }
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            for name, status in result.items():
+                print(f"{name}: {status['state']}")
+                for missing in status.get("missing", []):
+                    print(f"  - missing: {missing}")
+
     else:
         print("Usage:")
         print("  seo-agents research <topic>   — run research phase")
@@ -337,6 +358,7 @@ def main() -> None:
         print("  seo-agents validate           — validate generated outputs")
         print("  seo-agents actions            — show executable action queue")
         print("  seo-agents run-action <id>    — dry-run one action")
+        print("  seo-agents adapter-status     — show live adapter readiness")
         print("  seo-agents sync-gbp-schedule  — sync GBP schedule to poster workbook")
         print("  seo-agents --help             — full help")
         sys.exit(1)

@@ -319,10 +319,22 @@ def build_executor_crew() -> Crew:
 
     execution_queue = read_output("grizzly_execution_queue.md")
     manager_plan = read_output("grizzly_local_presence_plan.md")
+    wordpress_handoff = read_text(BASELINE_DIR / "wordpress-contact-form-access-2026-06-08.md")
+    contact_form_story = read_text(BASELINE_DIR / "contact-form-repair-success-story-2026-06-08.md")
+    wordpress_config_path = PROJECT_ROOT / "config" / "wordpress-sites" / "grizzly.json"
+    wordpress_config = read_text(wordpress_config_path) if wordpress_config_path.exists() else "{}"
 
     queue_context = (
-        "You are reading the execution queue cold — treat it as your only source of task instructions.\n\n"
-        f"EXECUTION QUEUE:\n\n{execution_queue}"
+        "You are reading the execution queue plus current system handoff evidence. "
+        "Use the queue for task scope, and use the handoff evidence to avoid stale blockers. "
+        "If a task was previously blocked but current handoff evidence proves access or repair, reflect the current state.\n\n"
+        f"EXECUTION QUEUE:\n\n{execution_queue}\n\n"
+        "CURRENT WORDPRESS SITE CONFIG (no credentials):\n\n"
+        f"```json\n{wordpress_config}\n```\n\n"
+        "CURRENT WORDPRESS CONTACT FORM HANDOFF:\n\n"
+        f"{wordpress_handoff}\n\n"
+        "CONTACT FORM REPAIR SUCCESS STORY:\n\n"
+        f"{contact_form_story}"
     )
 
     # --- Executor agents ---

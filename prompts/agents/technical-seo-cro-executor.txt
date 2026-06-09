@@ -17,6 +17,8 @@ You execute tasks in these categories only:
 - Mobile usability recommendations
 - Page speed observations (from public evidence only)
 - robots.txt and sitemap observations
+- WordPress draft/update action payloads for approved website repairs
+- Contact Form 7 inspection and repair action payloads
 
 Do not execute service page copy creation, GBP post drafting, or review response tasks — those belong to other executors.
 
@@ -57,6 +59,39 @@ For conversion issues:
 - Recommended fix
 - Implementation notes for the website developer
 
+For WordPress/Contact Form 7 repairs:
+- Use known site config and baseline handoffs when available.
+- Produce an executable action payload, not free-form instructions only.
+- Include target form/page ID, current value, proposed value, approval requirement, and verification checklist.
+- Do not include or request stored credentials.
+- Do not mark a live repair COMPLETE unless a run record or public verification proves it.
+
+Action payload format:
+
+```json
+{
+  "action_type": "website_technical_change",
+  "platform": "website_cms",
+  "adapter": "wordpress_browser",
+  "target": {
+    "site_id": "grizzly",
+    "area": "contact_form_7",
+    "form_id": 626
+  },
+  "change": {
+    "field": "mail.sender",
+    "before": "known current value or unknown",
+    "after": "proposed value"
+  },
+  "approval_required": true,
+  "verification": [
+    "Confirm Contact Form 7 shows no configuration errors.",
+    "Submit public form test.",
+    "Confirm redirect or success message."
+  ]
+}
+```
+
 ### Step 4 — Write the Completion Report
 After completing the task, append a completion report block in exactly this format:
 
@@ -77,6 +112,7 @@ Owner Sign-Off Needed: YES | NO
 - Never claim technical findings that cannot be confirmed from the public page
 - Schema markup must use only confirmed business data
 - Do not claim to have made live changes — all output is draft/recommendation only
+- Live website changes must go through the MCC action queue and adapter approval flow
 - Do not overstate page speed issues, ranking impact, or indexing status without evidence
 - Do not mark COMPLETE unless every step in the definition of done is met
 - Flag any task requiring CMS or server access as BLOCKED with clear instructions for the owner

@@ -86,7 +86,7 @@ def _extract_task_blocks(text: str) -> list[dict[str, str]]:
     parts = re.split(r"(?=^### Task ID:\s*)", body, flags=re.MULTILINE)
     tasks: list[dict[str, str]] = []
     for part in parts:
-        task_id = re.search(r"^### Task ID:\s*([A-Z]+-\d+)", part, flags=re.MULTILINE)
+        task_id = re.search(r"^### Task ID:\s*([A-Z]+-?\d+)", part, flags=re.MULTILINE)
         if not task_id:
             continue
         task = {"id": task_id.group(1)}
@@ -102,6 +102,38 @@ def _extract_task_blocks(text: str) -> list[dict[str, str]]:
             match = re.search(rf"- \*\*{re.escape(label)}\*\*:\s*(.+)", part)
             if match:
                 task[key] = match.group(1).strip()
+        tasks.append(task)
+    if tasks:
+        return tasks
+    table_rows = re.findall(
+        r"^\|\s*([A-Z]+-?\d+)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|$",
+        body,
+        flags=re.MULTILINE,
+    )
+    for task_id, title, maybe_executor, result in table_rows:
+        if task_id == "Task ID":
+            continue
+        separator_values = {task_id.strip("- "), title.strip("- "), maybe_executor.strip("- "), result.strip("- ")}
+        if not any(separator_values):
+            continue
+        status = result.strip()
+        task: dict[str, str] = {
+            "id": task_id.strip(),
+            "title": title.strip(),
+            "status": status,
+            "definition_of_done": "YES" if status.upper() in {"VERIFIED", "COMPLETE"} else "PARTIAL" if status.upper() == "PARTIAL" else "NO",
+        }
+        if maybe_executor.strip() and maybe_executor.strip().upper() not in {"VERIFICATION RESULT", "WHAT WAS MISSING"}:
+            task["executor"] = maybe_executor.strip()
+        detail = re.search(
+            rf"^### Task {re.escape(task['id'])}:\s*.*?\n(.*?)(?=^### Task [A-Z]+-?\d+:|\Z)",
+            body,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        if detail:
+            reason = re.search(r"^- \*\*Reason\*\*:\s*(.+)", detail.group(1), flags=re.MULTILINE)
+            if reason:
+                task["notes"] = reason.group(1).strip()
         tasks.append(task)
     return tasks
 
@@ -138,6 +170,58 @@ def _extract_owner_signoffs(text: str) -> list[str]:
         for line in section.group(1).splitlines()
         if line.strip().startswith("- ")
     ]
+
+
+def _overlay_action_completion_status(
+    tasks: list[dict[str, str]],
+    action_queue: dict[str, Any],
+) -> list[dict[str, str]]:
+    actions_by_task = {
+        action.get("source_task_id"): action
+        for action in action_queue.get("actions", [])
+        if action.get("source_task_id")
+    }
+    updated: list[dict[str, str]] = []
+    for task in tasks:
+        action = actions_by_task.get(task.get("id"))
+        completion = action.get("completion", {}) if action else {}
+        if not completion:
+            updated.append(task)
+            continue
+        task = {**task}
+        completion_status = completion.get("completion_status", "").upper()
+        definition = completion.get("definition_of_done", "").upper()
+        if completion_status == "COMPLETE" and definition == "YES":
+            task["status"] = "COMPLETE"
+            task["definition_of_done"] = "YES"
+            task["notes"] = completion.get("action_taken", task.get("notes", ""))
+        elif completion_status:
+            task["status"] = completion_status
+            task["definition_of_done"] = completion.get("definition_of_done", task.get("definition_of_done", ""))
+            task["notes"] = completion.get("blocker") or completion.get("action_taken", task.get("notes", ""))
+        updated.append(task)
+    return updated
+
+
+def _task_counts(tasks: list[dict[str, str]]) -> dict[str, int]:
+    verified = 0
+    partial = 0
+    incomplete = 0
+    for task in tasks:
+        status = task.get("status", "").upper()
+        definition = task.get("definition_of_done", "").upper()
+        if status in {"COMPLETE", "VERIFIED"} and definition == "YES":
+            verified += 1
+        elif status == "PARTIAL" or definition == "PARTIAL":
+            partial += 1
+        elif status:
+            incomplete += 1
+    return {
+        "total": len(tasks),
+        "verified": verified,
+        "partial": partial,
+        "incomplete": incomplete,
+    }
 
 
 def _phase_statuses(reports: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -190,12 +274,14 @@ def build_workflow_status(
     queued_tasks = _extract_queue_tasks(queue_text)
     owner_signoffs = _extract_owner_signoffs(final_text)
     action_queue = build_action_queue()
+    tasks = _overlay_action_completion_status(tasks, action_queue)
+    counts = _task_counts(tasks)
 
     summary = {
-        "total_tasks_checked": _extract_int(verification_source, "Total Tasks Checked"),
-        "count_verified": _extract_int(verification_source, "Count Verified"),
-        "count_partial": _extract_int(verification_source, "Count Partial"),
-        "count_incomplete": _extract_int(verification_source, "Count Incomplete"),
+        "total_tasks_checked": counts["total"] or _extract_int(verification_source, "Total Tasks Checked"),
+        "count_verified": counts["verified"],
+        "count_partial": counts["partial"],
+        "count_incomplete": counts["incomplete"],
         "tasks": tasks,
         "queued_tasks": queued_tasks,
         "owner_signoffs_needed": owner_signoffs,

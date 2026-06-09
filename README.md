@@ -67,12 +67,47 @@ Inspect and operate the action queue:
 $env:PYTHONPATH='src'
 .\.venv\Scripts\python.exe -m seo_agents.main actions
 .\.venv\Scripts\python.exe -m seo_agents.main actions --json
+.\.venv\Scripts\python.exe -m seo_agents.main adapter-status
+.\.venv\Scripts\python.exe -m seo_agents.main adapter-status --json
 .\.venv\Scripts\python.exe -m seo_agents.main approve-action gbp-post-YYYY-MM-DD --by MCC --note "Approved in MCC"
 .\.venv\Scripts\python.exe -m seo_agents.main run-action gbp-post-YYYY-MM-DD
 .\.venv\Scripts\python.exe -m seo_agents.main run-action gbp-post-YYYY-MM-DD --live
 ```
 
 Live actions require approval first. Dry-runs create run records without changing external systems.
+
+## Website / WordPress Action Adapter
+
+The website action layer is configured for Grizzly WordPress repair work at:
+
+```text
+config/wordpress-sites/grizzly.json
+```
+
+This file stores site structure, public URLs, Contact Form 7 IDs, safe repair patterns, and verification steps. It must not store WordPress credentials.
+
+Current adapter behavior:
+
+- Website actions are routed to `wordpress_browser` in `outputs/action_queue.json`.
+- Dry-runs create a structured execution payload and do not change the live site.
+- Live runs require owner approval and a configured `WORDPRESS_ACTION_ADAPTER`.
+- Browser/session credentials stay outside the repo.
+
+Useful commands:
+
+```powershell
+$env:PYTHONPATH='src'
+.\.venv\Scripts\python.exe -m seo_agents.main adapter-status
+.\.venv\Scripts\python.exe -m seo_agents.main actions --json
+.\.venv\Scripts\python.exe -m seo_agents.main run-action task-<id>
+```
+
+The first proven website repair pattern is documented in:
+
+```text
+knowledge/baselines/wordpress-contact-form-access-2026-06-08.md
+knowledge/baselines/contact-form-repair-success-story-2026-06-08.md
+```
 
 ## GBP Posting Adapter
 
