@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from datetime import date
@@ -8,6 +9,13 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from seo_agents.actions import (
+    approve_action,
+    format_action_queue_text,
+    run_action,
+    sync_gbp_schedule_to_workbook,
+    write_action_queue,
+)
 from seo_agents.crew import (
     DEFAULT_AUDIENCE,
     DEFAULT_REGION,
@@ -18,6 +26,13 @@ from seo_agents.crew import (
     build_executor_crew,
     build_poster_crew,
     build_seo_crew,
+)
+from seo_agents.status import (
+    build_workflow_status,
+    format_status_text,
+    format_validation_text,
+    validate_workflow_outputs,
+    write_workflow_status,
 )
 
 APPROVAL_BANNER = """
@@ -68,6 +83,48 @@ def parse_args() -> argparse.Namespace:
     poster.add_argument("--days", type=int, default=7, help="Number of days to schedule. Default: 7")
     poster.add_argument("--start-date", default="", help="Start date YYYY-MM-DD. Default: next business day.")
     poster.add_argument("--dry-run", action="store_true", help="Show crew config without calling LLM.")
+
+    # --- status subcommand ---
+    status = subparsers.add_parser(
+        "status",
+        help="Show workflow status from generated outputs.",
+    )
+    status.add_argument("--json", action="store_true", help="Print machine-readable workflow status JSON.")
+
+    # --- validate subcommand ---
+    validate = subparsers.add_parser(
+        "validate",
+        help="Validate generated workflow outputs without running agents.",
+    )
+    validate.add_argument("--json", action="store_true", help="Print validation results as JSON.")
+
+    # --- action queue commands ---
+    actions = subparsers.add_parser(
+        "actions",
+        help="Build and show executable action queue from workflow outputs.",
+    )
+    actions.add_argument("--json", action="store_true", help="Print action queue JSON.")
+
+    approve = subparsers.add_parser(
+        "approve-action",
+        help="Approve one action for live execution.",
+    )
+    approve.add_argument("action_id", help="Action id from seo-agents actions.")
+    approve.add_argument("--by", default="owner", help="Approver name. Default: owner")
+    approve.add_argument("--note", default="", help="Approval note.")
+
+    run = subparsers.add_parser(
+        "run-action",
+        help="Run one action. Defaults to dry-run; use --live only after approval.",
+    )
+    run.add_argument("action_id", help="Action id from seo-agents actions.")
+    run.add_argument("--live", action="store_true", help="Run against the live adapter where configured.")
+
+    sync_gbp = subparsers.add_parser(
+        "sync-gbp-schedule",
+        help="Sync gbp_posting_schedule.md into the existing GBP poster workbook.",
+    )
+    sync_gbp.add_argument("--dry-run", action="store_true", help="Preview workbook rows without writing.")
 
     # Legacy: allow `seo-agents <topic>` as shorthand for `seo-agents research <topic>`
     parser.add_argument("topic", nargs="?", help=argparse.SUPPRESS)
@@ -124,8 +181,31 @@ def main() -> None:
         try:
             result = crew.kickoff()
             print(result)
+            write_workflow_status(
+                phase="research",
+                phase_status="complete",
+                args={
+                    "topic": topic,
+                    "site_url": getattr(args, "site_url", ""),
+                    "audience": getattr(args, "audience", ""),
+                    "region": getattr(args, "region", ""),
+                    "keywords": getattr(args, "keywords", ""),
+                },
+            )
             print(APPROVAL_BANNER)
         except Exception as e:
+            write_workflow_status(
+                phase="research",
+                phase_status="failed",
+                args={
+                    "topic": topic,
+                    "site_url": getattr(args, "site_url", ""),
+                    "audience": getattr(args, "audience", ""),
+                    "region": getattr(args, "region", ""),
+                    "keywords": getattr(args, "keywords", ""),
+                },
+                error=str(e),
+            )
             print(f"\n❌ Research crew failed: {e}")
             sys.exit(1)
 
@@ -154,7 +234,13 @@ def main() -> None:
                 archived = ARCHIVE_DIR / f"final_report_{stamp}.md"
                 archived.write_bytes(final.read_bytes())
                 print(f"\n✅ Final report archived to: {archived}")
+            write_workflow_status(
+                phase="execute",
+                phase_status="complete",
+                extra={"archived_final_report": str(archived) if final.exists() else ""},
+            )
         except Exception as e:
+            write_workflow_status(phase="execute", phase_status="failed", error=str(e))
             print(f"\n❌ Executor crew failed: {e}")
             sys.exit(1)
 
@@ -189,15 +275,69 @@ def main() -> None:
                     print(f"   - {f}")
             else:
                 print("ℹ️  No photos to archive (NEEDS PHOTO entries or no matches in manifest).")
+            write_workflow_status(
+                phase="post_schedule",
+                phase_status="complete",
+                args={"start_date": start_date, "days": getattr(args, "days", 7)},
+                extra={"archived_photos": archived},
+            )
         except Exception as e:
+            write_workflow_status(
+                phase="post_schedule",
+                phase_status="failed",
+                args={"start_date": start_date, "days": getattr(args, "days", 7)},
+                error=str(e),
+            )
             print(f"\n❌ GBP Poster crew failed: {e}")
             sys.exit(1)
+
+    elif command == "status":
+        status = write_workflow_status(phase="status", phase_status="complete")
+        if args.json:
+            print(json.dumps(status, indent=2))
+        else:
+            print(format_status_text(status))
+
+    elif command == "validate":
+        status = build_workflow_status(phase="validate", phase_status="complete")
+        issues = validate_workflow_outputs(status)
+        if args.json:
+            print(json.dumps({"ok": not issues, "issues": issues, "status": status}, indent=2))
+        else:
+            print(format_validation_text(issues))
+        if issues:
+            sys.exit(1)
+
+    elif command == "actions":
+        queue = write_action_queue()
+        if args.json:
+            print(json.dumps(queue, indent=2))
+        else:
+            print(format_action_queue_text(queue))
+
+    elif command == "approve-action":
+        queue = approve_action(args.action_id, approved_by=args.by, note=args.note)
+        action = next(item for item in queue["actions"] if item["id"] == args.action_id)
+        print(f"Approved {action['id']}: {action['title']}")
+
+    elif command == "run-action":
+        result = run_action(args.action_id, live=args.live)
+        print(json.dumps(result, indent=2))
+
+    elif command == "sync-gbp-schedule":
+        result = sync_gbp_schedule_to_workbook(dry_run=args.dry_run)
+        print(json.dumps(result, indent=2))
 
     else:
         print("Usage:")
         print("  seo-agents research <topic>   — run research phase")
         print("  seo-agents execute            — run execution phase (after owner review)")
         print("  seo-agents post-schedule      — generate 7-day GBP posting schedule")
+        print("  seo-agents status             — show workflow status")
+        print("  seo-agents validate           — validate generated outputs")
+        print("  seo-agents actions            — show executable action queue")
+        print("  seo-agents run-action <id>    — dry-run one action")
+        print("  seo-agents sync-gbp-schedule  — sync GBP schedule to poster workbook")
         print("  seo-agents --help             — full help")
         sys.exit(1)
 
