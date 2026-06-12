@@ -115,20 +115,56 @@ function parseGbpSchedule(text) {
 // Parse website tasks from execution queue + reports
 // ─────────────────────────────────────────────
 
+function stripCodeFence(text) {
+  // Remove leading/trailing ```markdown or ``` wrappers the LLM sometimes adds
+  return text.replace(/^```(?:markdown)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+}
+
 function parseWebsiteTasks(executionQueueText, finalReportText) {
   const tasks = [];
+  const seenTitles = new Set();
 
   // From final_report.md — incomplete tasks become pending website tasks
   if (finalReportText) {
-    const incompleteSection = finalReportText.match(/##\s+Incomplete.*?Tasks([\s\S]*?)(?=##|$)/i)?.[1] || '';
-    const rows = [...incompleteSection.matchAll(/\|\s*(T\d+)\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|/g)];
-    for (const [, id, title, missing, next] of rows) {
+    const clean = stripCodeFence(finalReportText);
+
+    // Format A: markdown table rows  | T001 | Title | Missing | Next |
+    const incompleteSection = clean.match(/##\s+Incomplete[^#]*([\s\S]*?)(?=\n##|$)/i)?.[1] || '';
+    const tableRows = [...incompleteSection.matchAll(/\|\s*(T\d+)\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|/g)];
+    for (const [, id, title, missing, next] of tableRows) {
+      const t = title.trim();
+      if (!t || seenTitles.has(t)) continue;
+      seenTitles.add(t);
       tasks.push({
         type: 'seo_fix',
         priority: 'high',
-        title: title.trim(),
+        title: t,
         description: `Missing: ${missing.trim()}\nNext step: ${next.trim()}`,
         details: { task_id: id.trim(), source: 'final_report' },
+        status: 'pending_approval',
+      });
+    }
+
+    // Format B: ### Task N: Title header blocks with bullet fields
+    // Matches blocks starting at "### Task" up to the next "###" or "##" or end
+    const headerBlocks = [...clean.matchAll(/###\s+Task\s+\d+[:\s]+([^\n]+)([\s\S]*?)(?=\n###|\n##|$)/gi)];
+    for (const [, headerTitle, body] of headerBlocks) {
+      const getBullet = key => {
+        const m = body.match(new RegExp(`\\*{0,2}${key}\\*{0,2}\\s*:\\s*(.+)`, 'i'));
+        return m ? m[1].replace(/\*{0,2}$/, '').trim() : '';
+      };
+      const taskId = getBullet('Task ID') || getBullet('Task Id') || '';
+      const title = (getBullet('Task Title') || headerTitle).trim();
+      const missing = getBullet('What was missing') || getBullet('Missing') || '';
+      const next = getBullet('Recommended Next Step') || getBullet('Next Step') || '';
+      if (!title || seenTitles.has(title)) continue;
+      seenTitles.add(title);
+      tasks.push({
+        type: 'seo_fix',
+        priority: 'high',
+        title,
+        description: [missing && `Missing: ${missing}`, next && `Next step: ${next}`].filter(Boolean).join('\n'),
+        details: { task_id: taskId, source: 'final_report' },
         status: 'pending_approval',
       });
     }
@@ -136,22 +172,35 @@ function parseWebsiteTasks(executionQueueText, finalReportText) {
 
   // From grizzly_execution_queue.md
   if (executionQueueText) {
-    const taskBlocks = executionQueueText.split(/\n\s*---\s*\n/).filter(b => b.includes('Task ID:') || b.includes('TASK_ID:'));
-    for (const block of taskBlocks) {
+    const clean = stripCodeFence(executionQueueText);
+
+    // Format A: blocks separated by --- horizontal rule
+    const hrBlocks = clean.split(/\n\s*---\s*\n/).filter(b => /Task\s+(ID|Title)/i.test(b));
+
+    // Format B: blocks separated by ## Task N: headers (most common in this pipeline)
+    const headerMatches = [...clean.matchAll(/##\s+Task\s+\d+[:\s]+[^\n]+([\s\S]*?)(?=\n##|\n#|$)/gi)];
+    const headerBlocks = headerMatches.map(m => m[0]);
+
+    const allBlocks = hrBlocks.length ? hrBlocks : headerBlocks;
+
+    for (const block of allBlocks) {
       const getField = key => {
-        const m = block.match(new RegExp(`${key}[:\\s]+(.+)`, 'i'));
-        return m ? m[1].trim() : '';
+        // Handles: "**Task Title**: value", "Task Title: value", "1) **Task Title**: value"
+        const m = block.match(new RegExp(`\\*{0,2}${key}\\*{0,2}\\s*:(?:\\*{0,2})?\\s*(.+)`, 'i'));
+        return m ? m[1].replace(/\*{0,2}$/, '').trim() : '';
       };
       const title = getField('Task Title') || getField('TASK_TITLE') || getField('Title');
-      const type = getField('Type') || getField('TYPE') || 'seo_fix';
-      const priority = getField('Priority') || getField('PRIORITY') || 'medium';
-      if (!title) continue;
+      if (!title || seenTitles.has(title)) continue;
+      seenTitles.add(title);
+      const rawPriority = getField('Priority') || getField('PRIORITY') || '';
+      const type = getField('Type') || getField('TYPE') || '';
+      const taskId = getField('Task ID') || getField('Task Id') || '';
       tasks.push({
-        type: mapTaskType(type),
-        priority: mapPriority(priority),
+        type: mapTaskType(type || title),
+        priority: mapPriority(rawPriority),
         title,
         description: getField('Description') || getField('DESCRIPTION') || '',
-        details: { source: 'execution_queue' },
+        details: { task_id: taskId, source: 'execution_queue' },
         status: 'pending_approval',
       });
     }

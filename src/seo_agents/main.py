@@ -438,6 +438,30 @@ def compact_baselines(dry_run: bool = False) -> dict:
     }
 
 
+def _run_supabase_sync(week_of: str = "") -> None:
+    """Push the current outputs to Supabase after a pipeline phase completes."""
+    import subprocess
+
+    script = Path(__file__).parent.parent.parent / "scripts" / "supabase-sync.mjs"
+    if not script.exists():
+        print("⚠ supabase-sync.mjs not found — skipping Supabase sync")
+        return
+    cmd = ["node", str(script)]
+    if week_of:
+        cmd += ["--week-of", week_of]
+    print("\n🔄 Syncing to Supabase...")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=str(script.parent.parent))
+        if proc.stdout:
+            print(proc.stdout.strip())
+        if proc.returncode != 0:
+            print(f"⚠ Supabase sync failed (exit {proc.returncode}): {proc.stderr.strip()}")
+        else:
+            print("✅ Supabase sync complete")
+    except Exception as exc:
+        print(f"⚠ Supabase sync error: {exc}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Grizzly CrewAI local SEO agent system.",
@@ -662,6 +686,49 @@ def main() -> None:
             print(f"\n❌ Executor crew failed: {e}")
             sys.exit(1)
 
+        # ── Auto-run posting schedule phases ─────────────────────────────
+        start_date = date.today().isoformat()
+
+        print(f"\n{'─'*60}")
+        print(f"📅 Auto-running GBP post schedule (starting {start_date})...")
+        t1 = time.monotonic()
+        try:
+            gbp_crew = build_poster_crew(start_date=start_date, days=7)
+            gbp_result = gbp_crew.kickoff()
+            print(gbp_result)
+            schedule_path = OUTPUT_DIR / "gbp_posting_schedule.md"
+            photo_path = os.getenv("GBP_PHOTO_PATH", r"C:\Workspace\Shared\Assets\Media\Grizzly\GBP Post Photos")
+            archived_photos = archive_used_photos(schedule_path, Path(photo_path))
+            if archived_photos:
+                print(f"📁 Archived {len(archived_photos)} photo(s) to Archive folder")
+            write_run_health("post_schedule", "success", started_at=t1)
+            write_workflow_status(
+                phase="post_schedule",
+                phase_status="complete",
+                args={"start_date": start_date, "days": 7},
+                extra={"archived_photos": archived_photos},
+            )
+            print(f"✅ GBP posting schedule saved")
+        except Exception as e:
+            write_run_health("post_schedule", "failed", error=str(e), started_at=t1)
+            write_workflow_status(phase="post_schedule", phase_status="failed", error=str(e))
+            print(f"⚠ GBP post schedule failed (non-fatal): {e}")
+
+        print(f"\n{'─'*60}")
+        print(f"📘 Auto-running Facebook post schedule (starting {start_date})...")
+        t2 = time.monotonic()
+        try:
+            fb_crew = build_facebook_crew(start_date=start_date, days=7)
+            fb_result = fb_crew.kickoff()
+            print(fb_result)
+            write_run_health("facebook_schedule", "success", started_at=t2)
+            print(f"✅ Facebook posting schedule saved")
+        except Exception as e:
+            write_run_health("facebook_schedule", "failed", error=str(e), started_at=t2)
+            print(f"⚠ Facebook schedule failed (non-fatal): {e}")
+
+        _run_supabase_sync()
+
     elif command == "post-schedule":
         # Default start_date to today so the agent doesn't hallucinate a date
         start_date = getattr(args, "start_date", "") or date.today().isoformat()
@@ -701,6 +768,7 @@ def main() -> None:
                 args={"start_date": start_date, "days": getattr(args, "days", 7)},
                 extra={"archived_photos": archived},
             )
+            _run_supabase_sync(week_of=start_date)
         except Exception as e:
             write_run_health("post_schedule", "failed", error=str(e), started_at=t0)
             write_workflow_status(
@@ -819,6 +887,7 @@ def main() -> None:
             result = crew.kickoff()
             print(f"\n✅ Facebook schedule written to: outputs/facebook_posting_schedule.md")
             print("  Run `seo-agents actions` to see the new Facebook post actions in the queue.")
+            _run_supabase_sync(week_of=start_date)
         except Exception as e:
             print(f"\n❌ Facebook Schedule crew failed: {e}")
             sys.exit(1)
