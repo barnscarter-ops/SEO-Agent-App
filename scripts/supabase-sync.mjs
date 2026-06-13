@@ -59,10 +59,13 @@ function readFile(filename) {
 
 function parseFacebookSchedule(text) {
   if (!text) return [];
-  const blocks = text.split(/\n\s*---\s*\n/).filter(b => b.includes('DAY:'));
+  // Strip leading ```markdown code fence the LLM sometimes adds
+  text = stripCodeFence(text);
+  const blocks = text.split(/\n\s*---\s*\n/).filter(b => /DAY:/i.test(b));
   return blocks.map(block => {
     const get = key => {
-      const m = block.match(new RegExp(`^${key}:\\s*(.+)$`, 'm'));
+      // Handle both plain `KEY: value` and bold `**KEY: value**` formats
+      const m = block.match(new RegExp(`^\\*{0,2}${key}:\\*{0,2}\\s*(.+?)\\s*\\*{0,2}\\s*$`, 'm'));
       return m ? m[1].trim() : '';
     };
     return {

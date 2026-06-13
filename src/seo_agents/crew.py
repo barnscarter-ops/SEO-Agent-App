@@ -173,6 +173,7 @@ def build_grizzly_crew(
     region: str = "",
     keywords: str = "",
     previous_context: str = "",
+    completed_tasks: str = "",
 ) -> Crew:
     research_llm = build_research_llm()
     exec_llm = build_exec_llm()
@@ -194,6 +195,8 @@ def build_grizzly_crew(
     )
     if previous_context:
         shared_context += f"\n\n---\n\n{previous_context}"
+    if completed_tasks:
+        shared_context += f"\n\n---\n\n{completed_tasks}"
 
     # --- Research agents (gpt-4o-mini) ---
     content_agent = Agent(
@@ -271,8 +274,20 @@ def build_grizzly_crew(
     website_task = Task(
         description=(
             f"{shared_context}\n\n"
-            "Review website SEO for the current focus using the baseline report and live/public page evidence "
-            "available through tools. Do not claim access to Search Console, CMS, forms, or rankings unless proven."
+            "Review website SEO for the current focus using the baseline report AND live verification via ScrapeWebsiteTool.\n\n"
+            "STEP 1 — VERIFY COMPLETED TASKS FIRST (mandatory before any new research):\n"
+            "The shared context above includes a 'COMPLETED TASKS FROM PREVIOUS RUNS' section. For each completed task, "
+            "scrape the relevant live page and confirm the work is still in place. Report each as:\n"
+            "  ✅ CONFIRMED LIVE: [task title] — [what you saw on the page]\n"
+            "  ❌ REGRESSION: [task title] — [what is missing or broken now]\n"
+            "Do this check for every completed task before writing any new recommendations.\n\n"
+            "STEP 2 — LIVE VERIFICATION RULE (mandatory for all issues):\n"
+            "For every issue mentioned in the baseline, scrape the relevant live page and confirm the issue still exists "
+            "before recommending it. If the page looks fine, the form works, or the issue is gone — mark it RESOLVED "
+            "and do not recommend it. Only surface issues that are present right now.\n\n"
+            "For conversion issues specifically (contact form, phone visibility, CTAs): scrape the contact page and the "
+            "homepage. Report what you actually see, not what the baseline says to expect.\n\n"
+            "Do not claim access to Search Console, CMS backend, or rankings data unless proven by tool output."
         ),
         expected_output=(
             "A Website SEO Report wrapped in [START:WEBSITE]...[END:WEBSITE] markers, containing: "
@@ -894,6 +909,7 @@ def build_seo_crew(
     region: str = "",
     keywords: str = "",
     previous_context: str = "",
+    completed_tasks: str = "",
 ) -> Crew:
     return build_grizzly_crew(
         topic=topic,
@@ -902,4 +918,5 @@ def build_seo_crew(
         region=region,
         keywords=keywords,
         previous_context=previous_context,
+        completed_tasks=completed_tasks,
     )

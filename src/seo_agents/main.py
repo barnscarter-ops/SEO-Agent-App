@@ -438,6 +438,38 @@ def compact_baselines(dry_run: bool = False) -> dict:
     }
 
 
+def _fetch_completed_tasks() -> str:
+    """Fetch all completed website tasks from Supabase to inject into research context."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    url = os.getenv("SUPABASE_URL", "").rstrip("/")
+    key = os.getenv("SUPABASE_SERVICE_KEY", "")
+    if not url or not key:
+        return ""
+    try:
+        req = urllib.request.Request(
+            f"{url}/rest/v1/website_tasks?status=eq.done&select=title,description,details,updated_at,run_id&order=updated_at.desc&limit=50",
+            headers={"apikey": key, "Authorization": f"Bearer {key}", "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            tasks = json.loads(resp.read())
+        if not tasks:
+            return ""
+        lines = ["COMPLETED TASKS FROM PREVIOUS RUNS (verify each is still live before recommending it again):"]
+        for t in tasks:
+            completed = t.get("updated_at", "")[:10] if t.get("updated_at") else "unknown date"
+            task_id = (t.get("details") or {}).get("task_id", "?") if isinstance(t.get("details"), dict) else "?"
+            lines.append(f"  - [{task_id}] {t.get('title', '?')} — completed {completed}")
+        lines.append("\nFor each item above: scrape the relevant page and confirm the work is still in place.")
+        lines.append("Mark CONFIRMED LIVE or REGRESSION before writing any new recommendations.")
+        return "\n".join(lines)
+    except Exception as exc:
+        print(f"⚠ Could not fetch completed tasks from Supabase: {exc}")
+        return ""
+
+
 def _run_supabase_sync(week_of: str = "") -> None:
     """Push the current outputs to Supabase after a pipeline phase completes."""
     import subprocess
@@ -613,7 +645,24 @@ def main() -> None:
             "region": getattr(args, "region", ""),
             "keywords": getattr(args, "keywords", ""),
         }
+
+        # Compact baselines first so agents don't re-recommend completed items
+        print("\n🗜  Compacting baselines before research...")
+        compact_result = compact_baselines()
+        if compact_result["status"] == "compacted":
+            print(f"   ✅ Baselines compacted: {len(compact_result['archived_files'])} files → {compact_result['output']} ({compact_result['reduction_pct']}% smaller)")
+        elif compact_result["status"] == "nothing_to_compact":
+            print("   ℹ  No baseline files to compact — continuing.")
+        else:
+            print(f"   ℹ  Baselines: {compact_result['status']}")
+
         previous_context = load_previous_run_context()
+        print("📋 Fetching completed tasks from Supabase...")
+        completed_tasks = _fetch_completed_tasks()
+        if completed_tasks:
+            print(f"   ✅ {completed_tasks.count(chr(10) + '  -')} completed task(s) loaded for verification")
+        else:
+            print("   ℹ  No completed tasks found — skipping verification step")
         crew = build_seo_crew(
             topic=topic,
             site_url=run_args["site_url"],
@@ -621,6 +670,7 @@ def main() -> None:
             region=run_args["region"],
             keywords=run_args["keywords"],
             previous_context=previous_context,
+            completed_tasks=completed_tasks,
         )
         if args.dry_run:
             print(f"Ready: {crew.name}")
