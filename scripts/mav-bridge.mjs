@@ -38,6 +38,9 @@ const POLL_INTERVAL_MS = parseInt(process.env.MAV_BRIDGE_POLL_MS || '30000');
 const BRIDGE_PORT = parseInt(process.env.MAV_BRIDGE_PORT || '8790');
 const SEO_AGENTS_EXE = process.env.SEO_AGENTS_EXE
   || 'C:\\Users\\carte\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\seo-agents.exe';
+const PENDING_PROMPT_FILE = path.join(PROJECT_ROOT, 'outputs', 'pending_prompt.json');
+const GBP_POSTER_PATH = 'C:\\Users\\carte\\.claude\\skills\\gbp-poster\\driver.mjs';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   console.error('[mav-bridge] SUPABASE_URL or SUPABASE_SERVICE_KEY not set — exiting');
@@ -85,16 +88,100 @@ async function runPhase(runId, phase, exe, args, cwd) {
 // Handle an approved run
 // ─────────────────────────────────────────────
 
+// ─────────────────────────────────────────────
+// Video prompt helpers
+// ─────────────────────────────────────────────
+
+async function generateDay1VideoPrompt(scheduleFile) {
+  const text = fs.readFileSync(scheduleFile, 'utf8');
+  const blocks = text.split(/\n\s*---\s*\n/).filter(b => b.includes('DAY:'));
+  const day1 = blocks[0];
+  if (!day1) return null;
+  const get = (key) => {
+    const m = day1.match(new RegExp(`^\\*{0,2}${key}:\\s*(.*?)\\s*$`, 'm'));
+    return m ? (m[1] || '').replace(/\*\*/g, '').trim() : '';
+  };
+  const service = get('SERVICE');
+  const hook = get('HOOK');
+  const body = get('BODY');
+  const cta = get('CTA');
+  const hashtags = get('HASHTAGS');
+  const caption = [hook ? `${hook}\n\n` : '', body, hashtags ? `\n\n${hashtags}` : '', cta ? `\n\n${cta}` : ''].join('').trim();
+
+  if (!OPENAI_API_KEY) return get('VIDEO_PROMPT') || null;
+
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini', max_tokens: 300,
+      messages: [
+        { role: 'system', content: `You are a video director writing Veo 3 generation prompts for Grizzly Electrical Solutions, a licensed residential and commercial electrician in DFW, Texas.\n\nWrite a single vivid, cinematic prompt (100-140 words) that:\n- Opens with an establishing shot that sets a relatable scene (home, family, business)\n- Builds tension around an electrical problem (flickering lights, sparking outlet, dead panel, etc.)\n- Includes a dramatic visual moment — arcing breakers, sparks, smoke, worried faces, a professional electrician arriving\n- Feels like a mini movie trailer — emotional, urgent, real\n- Matches the service and caption topic provided\n- Ends with: Photorealistic, cinematic, 4K, dramatic atmosphere, no text overlays.\n\nOutput the prompt only. No explanation, no quotes, no title.` },
+        { role: 'user', content: `Service: ${service}\nHook: ${hook}\nCaption:\n${caption}` },
+      ],
+    }),
+  });
+  const json = await res.json();
+  return json.choices?.[0]?.message?.content?.trim() || get('VIDEO_PROMPT') || null;
+}
+
+function writePendingPrompt(runId, prompt) {
+  fs.mkdirSync(path.join(PROJECT_ROOT, 'outputs'), { recursive: true });
+  fs.writeFileSync(PENDING_PROMPT_FILE, JSON.stringify({ runId, prompt, approved: false, approvedPrompt: null }));
+}
+
+function readPendingPrompt() {
+  if (!fs.existsSync(PENDING_PROMPT_FILE)) return null;
+  try { return JSON.parse(fs.readFileSync(PENDING_PROMPT_FILE, 'utf8')); } catch { return null; }
+}
+
+function clearPendingPrompt() {
+  if (fs.existsSync(PENDING_PROMPT_FILE)) fs.unlinkSync(PENDING_PROMPT_FILE);
+}
+
+async function waitForPromptApproval(runId) {
+  // Poll every 5s for up to 30 minutes
+  for (let i = 0; i < 360; i++) {
+    await new Promise(r => setTimeout(r, 5000));
+    const state = readPendingPrompt();
+    if (state?.runId === runId && state?.approved) return state.approvedPrompt;
+  }
+  return null;
+}
+
 async function executeApprovedRun(run) {
   const { id: runId } = run;
   await log(runId, 'bridge', 'info', `Executing approved run ${runId}`);
+
+  // ── Step 0: Generate Day 1 video prompt and wait for user approval ──
+  const scheduleFile = path.join(PROJECT_ROOT, 'outputs', 'facebook_posting_schedule.md');
+  if (fs.existsSync(scheduleFile)) {
+    await log(runId, 'bridge', 'info', 'Generating Day 1 video prompt via GPT-4o-mini...');
+    const prompt = await generateDay1VideoPrompt(scheduleFile);
+    if (prompt) {
+      writePendingPrompt(runId, prompt);
+      await supabase.from('seo_runs').update({ status: 'awaiting_prompt' }).eq('id', runId);
+      await log(runId, 'bridge', 'info', 'Waiting for video prompt approval in dashboard...');
+      const approvedPrompt = await waitForPromptApproval(runId);
+      if (approvedPrompt) {
+        // Write approved prompt back to markdown
+        const text = fs.readFileSync(scheduleFile, 'utf8');
+        const updated = text.replace(/^(\*{0,2}VIDEO_PROMPT:\*{0,2})\s*.*?$/m, `VIDEO_PROMPT: ${approvedPrompt}`);
+        fs.writeFileSync(scheduleFile, updated, 'utf8');
+        await log(runId, 'bridge', 'info', 'Prompt approved and written to schedule.');
+      } else {
+        await log(runId, 'bridge', 'warn', 'Prompt approval timed out — using pre-generated prompt.');
+      }
+      clearPendingPrompt();
+    }
+  }
 
   // Mark as executing
   await supabase.from('seo_runs').update({ status: 'executing' }).eq('id', runId);
 
   let allOk = true;
 
-  // ── 1. Facebook posts (highest priority) ──────────────────────
+  // ── 1. Facebook posts ──────────────────────────────────────────
   const { data: fbPosts } = await supabase
     .from('weekly_posts')
     .select('*')
@@ -179,7 +266,6 @@ async function executeApprovedRun(run) {
       allOk = false;
     } else {
       // Post Day 1 immediately, schedule Days 2-7 for their dates
-      const GBP_POSTER_PATH = 'C:\\Users\\carte\\.claude\\skills\\gbp-poster\\driver.mjs';
       const day1Post = gbpPosts.find(p => p.day === 1);
 
       if (day1Post) {
@@ -274,6 +360,22 @@ async function poll() {
 
     if (runs?.length) {
       await executeApprovedRun(runs[0]);
+    }
+
+    // Also pick up awaiting_prompt runs if user already approved the prompt
+    const { data: waitingRuns } = await supabase
+      .from('seo_runs')
+      .select('*')
+      .eq('status', 'awaiting_prompt')
+      .order('created_at')
+      .limit(1);
+
+    if (waitingRuns?.length) {
+      const state = readPendingPrompt();
+      if (state?.runId === waitingRuns[0].id && state?.approved) {
+        // Prompt was approved externally — continue the run
+        await executeApprovedRun(waitingRuns[0]);
+      }
     }
   } catch (e) {
     console.error('[mav-bridge] Poll exception:', e.message);
@@ -468,6 +570,25 @@ async function handleHttpRequest(req, res) {
       .eq('run_id', run.id)
       .eq('status', 'pending_approval');
     sendJsonHttp(res, 200, { ok: true, mode: 'live', runId: run.id, message: 'Approved — bridge will execute on next poll.' });
+    return;
+  }
+
+  // ── GET /seo/facebook/pending-prompt ────────
+  if (method === 'GET' && url.pathname === '/seo/facebook/pending-prompt') {
+    const state = readPendingPrompt();
+    if (!state) { sendJsonHttp(res, 404, { error: 'No pending prompt' }); return; }
+    sendJsonHttp(res, 200, { runId: state.runId, prompt: state.prompt, approved: state.approved });
+    return;
+  }
+
+  // ── POST /seo/facebook/approve-prompt ───────
+  if (method === 'POST' && url.pathname === '/seo/facebook/approve-prompt') {
+    const { prompt } = await readBody(req);
+    if (!prompt) { sendJsonHttp(res, 400, { error: 'prompt required' }); return; }
+    const state = readPendingPrompt();
+    if (!state) { sendJsonHttp(res, 404, { error: 'No pending prompt' }); return; }
+    fs.writeFileSync(PENDING_PROMPT_FILE, JSON.stringify({ ...state, approved: true, approvedPrompt: prompt }));
+    sendJsonHttp(res, 200, { ok: true });
     return;
   }
 
