@@ -7,7 +7,7 @@ import shutil
 import smtplib
 import sys
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
 
@@ -648,15 +648,15 @@ def _run_execute_pipeline() -> None:
         print(f"\n❌ Executor crew failed: {e}")
         sys.exit(1)
 
-    # Schedule starts tomorrow: Day 1 posts immediately on Friday approval,
-    # Days 2-6 cover Saturday through Thursday via daily cron.
-    start_date = (date.today() + timedelta(days=1)).isoformat()
+    # Day 1 (today, Friday) posts immediately on approval.
+    # Days 2-7 (Saturday through Thursday) are the 6-day scheduled queue via daily cron.
+    start_date = date.today().isoformat()
 
     print(f"\n{'─'*60}")
     print(f"📅 Auto-running GBP post schedule (starting {start_date})...")
     t1 = time.monotonic()
     try:
-        gbp_crew = build_poster_crew(start_date=start_date, days=6)
+        gbp_crew = build_poster_crew(start_date=start_date, days=7)
         gbp_result = gbp_crew.kickoff()
         print(gbp_result)
         schedule_path = OUTPUT_DIR / "gbp_posting_schedule.md"
@@ -668,7 +668,7 @@ def _run_execute_pipeline() -> None:
         write_workflow_status(
             phase="post_schedule",
             phase_status="complete",
-            args={"start_date": start_date, "days": 6},
+            args={"start_date": start_date, "days": 7},
             extra={"archived_photos": archived_photos},
         )
         print(f"✅ GBP posting schedule saved")
@@ -681,7 +681,7 @@ def _run_execute_pipeline() -> None:
     print(f"📘 Auto-running Facebook post schedule (starting {start_date})...")
     t2 = time.monotonic()
     try:
-        fb_crew = build_facebook_crew(start_date=start_date, days=6)
+        fb_crew = build_facebook_crew(start_date=start_date, days=7)
         fb_result = fb_crew.kickoff()
         print(fb_result)
         write_run_health("facebook_schedule", "success", started_at=t2)
