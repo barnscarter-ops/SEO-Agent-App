@@ -164,7 +164,7 @@ async function executeApprovedRun(run) {
     .eq('status', 'approved');
 
   if (gbpPosts?.length) {
-    await log(runId, 'gbp', 'info', `Posting ${gbpPosts.length} GBP posts`);
+    await log(runId, 'gbp', 'info', `Scheduling ${gbpPosts.length} GBP posts`);
     await supabase.from('weekly_posts')
       .update({ status: 'posting' })
       .eq('run_id', runId).eq('platform', 'gbp').eq('status', 'approved');
@@ -178,39 +178,47 @@ async function executeApprovedRun(run) {
         .eq('run_id', runId).eq('platform', 'gbp').eq('status', 'posting');
       allOk = false;
     } else {
-      // Then post each GBP post via Playwright driver
+      // Post Day 1 immediately, schedule Days 2-7 for their dates
       const GBP_POSTER_PATH = 'C:\\Users\\carte\\.claude\\skills\\gbp-poster\\driver.mjs';
-      for (const post of gbpPosts) {
-        const postDate = post.post_date;
-        await log(runId, 'gbp', 'info', `Posting GBP ${postDate}...`);
-        const result = await runPhase(runId, 'gbp', 'node', [GBP_POSTER_PATH, '--date', postDate], PROJECT_ROOT);
+      const day1Post = gbpPosts.find(p => p.day === 1);
+
+      if (day1Post) {
+        await log(runId, 'gbp', 'info', `Posting Day 1 GBP immediately...`);
+        const result = await runPhase(runId, 'gbp', 'node', [GBP_POSTER_PATH, '--date', day1Post.post_date], PROJECT_ROOT);
         if (result.ok) {
           try {
             const lastLine = result.stdout.trim().split('\n').filter(l => l.startsWith('{')).pop();
             const parsed = lastLine ? JSON.parse(lastLine) : { result: 'unknown' };
-            const postStatus = parsed.result === 'posted' ? 'posted' : 'error';
-            const errorMsg = postStatus === 'error' ? (parsed.error || 'Unknown error') : null;
             await supabase.from('weekly_posts')
               .update({
-                status: postStatus,
-                error: errorMsg,
+                status: parsed.result === 'posted' ? 'posted' : 'error',
+                error: parsed.result === 'posted' ? null : (parsed.error || 'Unknown error'),
                 posted_at: new Date().toISOString(),
               })
-              .eq('id', post.id);
-            await log(runId, 'gbp', 'info', `GBP ${postDate}: ${postStatus}`);
+              .eq('id', day1Post.id);
+            await log(runId, 'gbp', 'info', `Day 1 GBP: ${parsed.result === 'posted' ? 'posted' : 'error'}`);
           } catch (parseErr) {
-            await log(runId, 'gbp', 'warn', `Could not parse GBP result for ${postDate}: ${parseErr.message}`);
+            await log(runId, 'gbp', 'warn', `Could not parse Day 1 GBP result: ${parseErr.message}`);
             await supabase.from('weekly_posts')
               .update({ status: 'posted', posted_at: new Date().toISOString() })
-              .eq('id', post.id);
+              .eq('id', day1Post.id);
           }
         } else {
           await supabase.from('weekly_posts')
             .update({ status: 'error', error: result.error })
-            .eq('id', post.id);
-          await log(runId, 'gbp', 'error', `GBP ${postDate} failed: ${result.error}`);
+            .eq('id', day1Post.id);
+          await log(runId, 'gbp', 'error', `Day 1 GBP failed: ${result.error}`);
           allOk = false;
         }
+      }
+
+      // Mark Days 2-7 as scheduled (will be posted by daily cron job)
+      const laterPosts = gbpPosts.filter(p => p.day > 1);
+      if (laterPosts.length) {
+        await supabase.from('weekly_posts')
+          .update({ status: 'scheduled' })
+          .eq('run_id', runId).eq('platform', 'gbp').gt('day', 1);
+        await log(runId, 'gbp', 'info', `Days 2-7 marked scheduled for daily poster`);
       }
     }
   }
