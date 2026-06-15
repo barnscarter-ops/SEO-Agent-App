@@ -61,12 +61,21 @@ function saveIndex(index) {
 
 async function scorePhoto(imagePath) {
   const ext = path.extname(imagePath).toLowerCase();
-  const mimeMap = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' };
-  const mime = mimeMap[ext] || 'image/jpeg';
 
-  // Read file and encode as base64
-  const imageData = fs.readFileSync(imagePath).toString('base64');
-  const dataUrl = `data:${mime};base64,${imageData}`;
+  let imageBuffer = fs.readFileSync(imagePath);
+  let mime = 'image/jpeg';
+
+  if (ext === '.heic' || ext === '.heif') {
+    const heicConvert = (await import('heic-convert')).default;
+    imageBuffer = Buffer.from(await heicConvert({ buffer: imageBuffer, format: 'JPEG', quality: 0.85 }));
+    mime = 'image/jpeg';
+  } else if (ext === '.png') {
+    mime = 'image/png';
+  } else if (ext === '.webp') {
+    mime = 'image/webp';
+  }
+
+  const dataUrl = `data:${mime};base64,${imageBuffer.toString('base64')}`;
 
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -120,6 +129,25 @@ async function scan(inboxFolder) {
   const index = loadIndex();
   const indexedPaths = new Set(index.map(e => e.source_path).filter(Boolean));
 
+  // Backfill: copy any Raw files missing from backup (e.g. scored before backup folder was writable)
+  if (BACKUP_FOLDER && fs.existsSync(RAW_FOLDER)) {
+    const rawFiles = fs.readdirSync(RAW_FOLDER).filter(f => SUPPORTED_EXTS.has(path.extname(f).toLowerCase()));
+    let backfilled = 0;
+    for (const f of rawFiles) {
+      const backupPath = path.join(BACKUP_FOLDER, f);
+      if (!fs.existsSync(backupPath)) {
+        try {
+          fs.mkdirSync(BACKUP_FOLDER, { recursive: true });
+          fs.copyFileSync(path.join(RAW_FOLDER, f), backupPath);
+          backfilled++;
+        } catch (e) {
+          console.warn(`  Backfill backup failed for ${f}: ${e.message}`);
+        }
+      }
+    }
+    if (backfilled > 0) console.log(`  Backfilled ${backfilled} Raw photos to backup folder`);
+  }
+
   const allFiles = fs.readdirSync(inboxFolder, { recursive: true })
     .filter(f => SUPPORTED_EXTS.has(path.extname(f).toLowerCase()))
     .map(f => path.join(inboxFolder, f))
@@ -170,6 +198,7 @@ async function scan(inboxFolder) {
           try {
             fs.mkdirSync(BACKUP_FOLDER, { recursive: true });
             fs.copyFileSync(filePath, path.join(BACKUP_FOLDER, filename));
+            console.log(`    → Backed up to: ${path.join(BACKUP_FOLDER, filename)}`);
           } catch (e) {
             console.warn(`    Backup failed (Proxmox reachable?): ${e.message}`);
           }

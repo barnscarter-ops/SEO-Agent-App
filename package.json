@@ -1,6 +1,7 @@
 {
   "dependencies": {
     "@supabase/supabase-js": "^2.108.1",
+    "heic-convert": "^2.1.0",
     "xlsx": "^0.18.5"
   }
 }
