@@ -76,11 +76,14 @@ async function runPhase(runId, phase, exe, args, cwd) {
     });
     if (stderr) await log(runId, phase, 'info', stderr.slice(0, 2000));
     await log(runId, phase, 'info', `Done: ${stdout.slice(0, 500)}`);
-    return { ok: true, stdout, stderr };
+    return { ok: true, stdout, stderr, exitCode: 0 };
   } catch (e) {
-    const detail = [e.message, e.stderr, e.stdout].filter(Boolean).join('\n').slice(0, 1500);
+    const stdout = e.stdout || '';
+    const stderr = e.stderr || '';
+    const exitCode = typeof e.code === 'number' ? e.code : -1;
+    const detail = [e.message, stderr, stdout].filter(Boolean).join('\n').slice(0, 1500);
     await log(runId, phase, 'error', detail);
-    return { ok: false, error: detail };
+    return { ok: false, stdout, stderr, exitCode, error: detail };
   }
 }
 
@@ -271,20 +274,17 @@ async function executeApprovedRun(run) {
       if (day1Post) {
         await log(runId, 'gbp', 'info', `Posting Day 1 GBP immediately...`);
         const result = await runPhase(runId, 'gbp', 'node', [GBP_POSTER_PATH, '--date', day1Post.post_date], PROJECT_ROOT);
-        if (result.ok) {
+        // exit 0 = posted+verified, exit 3 = posted but unverified — both count as success
+        const gbpOk = result.exitCode === 0 || result.exitCode === 3;
+        if (gbpOk) {
           try {
-            const lastLine = result.stdout.trim().split('\n').filter(l => l.startsWith('{')).pop();
-            const parsed = lastLine ? JSON.parse(lastLine) : { result: 'unknown' };
+            const lastLine = (result.stdout || '').trim().split('\n').filter(l => l.startsWith('{')).pop();
+            const parsed = lastLine ? JSON.parse(lastLine) : {};
             await supabase.from('weekly_posts')
-              .update({
-                status: parsed.result === 'posted' ? 'posted' : 'error',
-                error: parsed.result === 'posted' ? null : (parsed.error || 'Unknown error'),
-                posted_at: new Date().toISOString(),
-              })
+              .update({ status: 'posted', error: null, posted_at: new Date().toISOString(), platform_post_id: parsed.postUrl || null })
               .eq('id', day1Post.id);
-            await log(runId, 'gbp', 'info', `Day 1 GBP: ${parsed.result === 'posted' ? 'posted' : 'error'}`);
-          } catch (parseErr) {
-            await log(runId, 'gbp', 'warn', `Could not parse Day 1 GBP result: ${parseErr.message}`);
+            await log(runId, 'gbp', 'info', `Day 1 GBP posted (exit ${result.exitCode})`);
+          } catch {
             await supabase.from('weekly_posts')
               .update({ status: 'posted', posted_at: new Date().toISOString() })
               .eq('id', day1Post.id);
@@ -340,6 +340,7 @@ async function executeApprovedRun(run) {
 // ─────────────────────────────────────────────
 
 let busy = false;
+let lastDailyGbpDate = '';
 
 async function poll() {
   if (busy) return;
@@ -375,6 +376,46 @@ async function poll() {
       if (state?.runId === waitingRuns[0].id && state?.approved) {
         // Prompt was approved externally — continue the run
         await executeApprovedRun(waitingRuns[0]);
+      }
+    }
+
+    // ── Daily GBP poster ─────────────────────────
+    // Run once per calendar day after 9 AM CST (UTC-5/UTC-6).
+    // Posts any weekly_posts rows with platform=gbp, status=scheduled, post_date=today.
+    const nowUtc = new Date();
+    const cstHour = (nowUtc.getUTCHours() - 6 + 24) % 24; // CDT offset; switch to -5 for CST winter
+    const todayDate = nowUtc.toISOString().slice(0, 10);
+    if (cstHour >= 9 && lastDailyGbpDate !== todayDate) {
+      lastDailyGbpDate = todayDate;
+      const { data: todayGbp } = await supabase
+        .from('weekly_posts')
+        .select('id, run_id, post_date, photo_file')
+        .eq('platform', 'gbp')
+        .eq('status', 'scheduled')
+        .eq('post_date', todayDate);
+
+      for (const post of todayGbp || []) {
+        console.log(`[mav-bridge][gbp-daily] Posting scheduled GBP for ${post.post_date}`);
+        const result = await runPhase(post.run_id, 'gbp', 'node', [GBP_POSTER_PATH, '--date', post.post_date], PROJECT_ROOT);
+        let parsed = null;
+        try { parsed = JSON.parse((result.stdout || '').split('\n').filter(l => l.trim().startsWith('{')).pop() || '{}'); } catch {}
+        const gbpDailyOk = result.exitCode === 0 || result.exitCode === 3;
+        if (gbpDailyOk) {
+          let parsedUrl = null;
+          try {
+            const lastLine = (result.stdout || '').trim().split('\n').filter(l => l.startsWith('{')).pop();
+            parsedUrl = lastLine ? JSON.parse(lastLine).postUrl : null;
+          } catch {}
+          await supabase.from('weekly_posts')
+            .update({ status: 'posted', posted_at: new Date().toISOString(), platform_post_id: parsedUrl })
+            .eq('id', post.id);
+          console.log(`[mav-bridge][gbp-daily] Posted ${post.post_date} (exit ${result.exitCode})`);
+        } else {
+          await supabase.from('weekly_posts')
+            .update({ status: 'error', error: (result.stderr || result.error || 'GBP poster failed').slice(0, 300) })
+            .eq('id', post.id);
+          console.error(`[mav-bridge][gbp-daily] Failed ${post.post_date}: ${result.error?.slice(0, 200)}`);
+        }
       }
     }
   } catch (e) {
