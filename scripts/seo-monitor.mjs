@@ -249,19 +249,23 @@ async function checkMavBridge() {
   const result = await httpGet(MAV_BRIDGE_PORT, '/health');
   if (!result || result.status !== 200) {
     bridgeDownCount++;
-    if (bridgeDownCount >= 2) {
+    // 3 failures = ~90s window before alerting — avoids false positives on brief PM2 restarts
+    if (bridgeDownCount >= 3) {
       log('error', `mav-bridge unreachable (${bridgeDownCount} consecutive failures)`);
-      // Check if process is actually dead in PM2
       const procs = pm2List();
       const bridge = procs.find(p => p.name === 'mav-bridge');
       if (bridge && bridge.pm2_env.status !== 'online') {
         await fixDeadProcess('mav-bridge');
       } else {
-        await alertOnce('mav-bridge-down', 'mav-bridge is not responding', `The mav-bridge HTTP health check has failed ${bridgeDownCount} times.\n\nBridge status in PM2: ${bridge?.pm2_env?.status || 'unknown'}\nCheck logs: pm2 logs mav-bridge\nLog file: ${logFile}`);
+        await alertOnce('mav-bridge-down', 'mav-bridge is not responding', `The mav-bridge HTTP health check has failed ${bridgeDownCount} times (~${bridgeDownCount * 30}s).\n\nBridge status in PM2: ${bridge?.pm2_env?.status || 'unknown'}\nCheck logs: pm2 logs mav-bridge\nLog file: ${logFile}`);
       }
     }
   } else {
-    if (bridgeDownCount > 0) log('info', 'mav-bridge recovered', { was_down_count: bridgeDownCount });
+    if (bridgeDownCount > 0) {
+      log('info', 'mav-bridge recovered', { was_down_count: bridgeDownCount });
+      // Clear so we can re-alert if it goes down again mid-run
+      alertedErrors.delete('mav-bridge-down');
+    }
     bridgeDownCount = 0;
   }
   return !result ? false : result.status === 200;
@@ -282,7 +286,10 @@ async function checkMCCDashboard() {
       }
     }
   } else {
-    if (dashboardDownCount > 0) log('info', 'MCC dashboard recovered', { was_down_count: dashboardDownCount });
+    if (dashboardDownCount > 0) {
+      log('info', 'MCC dashboard recovered', { was_down_count: dashboardDownCount });
+      alertedErrors.delete('dashboard-down');
+    }
     dashboardDownCount = 0;
   }
 }
