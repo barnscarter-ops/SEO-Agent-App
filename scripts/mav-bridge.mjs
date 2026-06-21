@@ -44,6 +44,9 @@ const GBP_POSTER_PATH = 'C:\\Users\\carte\\.claude\\skills\\gbp-poster\\driver.m
 const GBP_WORKBOOK_PATH = process.env.GBP_WORKBOOK_PATH || '';
 const GBP_ARCHIVE_FOLDER = process.env.GBP_ARCHIVE_FOLDER || 'M:\\backups\\gbp-archive';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const SMTP_FROM = process.env.SMTP_FROM || '';
+const SMTP_TO = process.env.SMTP_TO || '';
+const SMTP_APP_PASSWORD = process.env.SMTP_APP_PASSWORD || '';
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   console.error('[mav-bridge] SUPABASE_URL or SUPABASE_SERVICE_KEY not set — exiting');
@@ -61,6 +64,22 @@ async function log(runId, phase, level, message) {
   console.log(line);
   if (runId) {
     await supabase.from('run_logs').insert({ run_id: runId, phase, level, message });
+  }
+}
+
+// ─────────────────────────────────────────────
+// Email alerts
+// ─────────────────────────────────────────────
+
+async function sendBridgeAlert(subject, body) {
+  if (!SMTP_FROM || !SMTP_TO || !SMTP_APP_PASSWORD) return;
+  try {
+    const { createTransport } = await import('nodemailer');
+    const t = createTransport({ service: 'gmail', auth: { user: SMTP_FROM, pass: SMTP_APP_PASSWORD } });
+    await t.sendMail({ from: SMTP_FROM, to: SMTP_TO, subject, text: body });
+    console.log(`[mav-bridge] Alert sent: ${subject}`);
+  } catch (e) {
+    console.error(`[mav-bridge] Alert email failed: ${e.message}`);
   }
 }
 
@@ -311,6 +330,14 @@ async function executeApprovedRun(run) {
         const parsed = JSON.parse((result.stdout || '').trim());
         const postResults = parsed?.results || [];
         const dayMap = new Map(postResults.map(r => [r.day, r]));
+
+        if (parsed?.gemini_credits_depleted) {
+          await log(runId, 'facebook', 'warn', 'GEMINI_CREDITS_DEPLETED: Video days posted as photos. Top up at https://aistudio.google.com/');
+          await sendBridgeAlert(
+            '⚠️ Grizzly SEO: Gemini Credits Depleted — Videos Not Generated',
+            `The weekly Facebook video posts (Days 1, 4, 7) could not be generated because your Gemini API prepayment credits are depleted.\n\nPosts were published as photo-only posts.\n\nTo restore video generation:\n1. Go to https://aistudio.google.com/\n2. Add prepayment credits to your Google AI account\n3. Next week's run will automatically generate videos again.\n\nRun ID: ${runId}`,
+          );
+        }
 
         for (const fbPost of fbPosts) {
           const r = dayMap.get(fbPost.day);

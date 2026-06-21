@@ -139,7 +139,7 @@ function httpGet(port, path, timeout = 5000) {
 // ── PM2 helpers ───────────────────────────────────────────────────────────────
 function pm2List() {
   try {
-    const out = execSync('pm2 jlist', { encoding: 'utf8', timeout: 10000 });
+    const out = execSync('pm2 jlist', { encoding: 'utf8', timeout: 10000, windowsHide: true });
     return JSON.parse(out);
   } catch {
     return [];
@@ -148,7 +148,7 @@ function pm2List() {
 
 function pm2Restart(name) {
   try {
-    execSync(`pm2 restart "${name}"`, { encoding: 'utf8', timeout: 15000 });
+    execSync(`pm2 restart "${name}"`, { encoding: 'utf8', timeout: 15000, windowsHide: true });
     return true;
   } catch (e) {
     log('error', `pm2 restart failed for ${name}`, { error: e.message });
@@ -159,7 +159,7 @@ function pm2Restart(name) {
 // ── Drive helpers ─────────────────────────────────────────────────────────────
 function isMDriveMounted() {
   try {
-    const out = execSync('net use M:', { encoding: 'utf8', timeout: 5000 });
+    const out = execSync('net use M:', { encoding: 'utf8', timeout: 5000, windowsHide: true });
     return out.includes('\\\\') || out.includes('OK') || out.includes('Open');
   } catch {
     return false;
@@ -168,7 +168,7 @@ function isMDriveMounted() {
 
 function mountMDrive() {
   try {
-    execSync('net use M: \\\\192.168.1.12\\Proxmox /persistent:yes', { encoding: 'utf8', timeout: 15000 });
+    execSync('net use M: \\\\192.168.1.12\\Proxmox /persistent:yes', { encoding: 'utf8', timeout: 15000, windowsHide: true });
     return true;
   } catch (e) {
     log('error', 'Failed to remount M: drive', { error: e.message });

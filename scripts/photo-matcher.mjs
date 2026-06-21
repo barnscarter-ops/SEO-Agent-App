@@ -171,7 +171,7 @@ Reply ONLY with a JSON array of ${posts.length} photo indices (1-based, matching
 // ── Service type helpers ───────────────────────────────────────────────────
 
 const SERVICE_TYPE_KEYWORDS = {
-  panel: ['panel', 'breaker', 'main panel', 'subpanel', 'electrical panel', 'box'],
+  panel: ['panel', 'breaker', 'main panel', 'subpanel', 'electrical panel', 'service panel', 'load center'],
   'ev-charger': ['ev', 'charger', 'electric vehicle', 'level 2', 'charging station', 'tesla'],
   lighting: ['light', 'fixture', 'recessed', 'ceiling fan', 'dimmer', 'lamp', 'led', 'illuminat'],
   wiring: ['wiring', 'wire', 'conduit', 'romex', 'junction', 'rewir'],

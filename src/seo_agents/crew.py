@@ -258,13 +258,18 @@ def build_grizzly_crew(
     content_task = Task(
         description=(
             f"{shared_context}\n\n"
-            "Create an updated Content / Keyword Plan for the current focus. Preserve the Grizzly tone, "
-            "avoid DIY electrical troubleshooting steps, and include draft-ready content only where useful."
+            "Create an updated Content / Keyword Plan for the current focus.\n\n"
+            "LIVE SEARCH REQUIREMENT: Use SerperDevTool to search for the focus topic plus 2-3 related "
+            "electrical service queries in DFW. Record the People Also Ask questions and top organic results "
+            "you actually find — these become the keyword opportunities. Do not rely on memory alone.\n"
+            "If SerperDevTool is unavailable, label all keyword data as 'BASELINE ESTIMATE'.\n\n"
+            "Preserve the Grizzly tone, avoid DIY electrical troubleshooting steps, "
+            "and include draft-ready content only where useful."
         ),
         expected_output=(
             "A Content / Keyword Plan wrapped in [START:CONTENT]...[END:CONTENT] markers, containing: "
-            "keyword opportunities, blog topics, GBP/social drafts, website copy suggestions, "
-            "priority ranking, ready-to-publish drafts, and owner approval needs."
+            "keyword opportunities (with data source noted), blog topics, GBP/social drafts, "
+            "website copy suggestions, priority ranking, ready-to-publish drafts, and owner approval needs."
         ),
         agent=content_agent,
         output_file=out("content_report.md"),
@@ -302,15 +307,35 @@ def build_grizzly_crew(
     gbp_task = Task(
         description=(
             f"{shared_context}\n\n"
-            "Prepare a GBP / Local Rankings Report for the current focus. Use SerperDevTool to pull "
-            "this week's trending electrical service queries in DFW. Use the imported baseline and any "
-            "available public evidence. Clearly label missing owner-access items."
+            "Prepare a GBP / Local Rankings Report for the current focus.\n\n"
+            "TREND RESEARCH (your primary job — do this first):\n"
+            "Use SerperDevTool to search Google for each of these queries and record the ACTUAL results you find:\n"
+            "  1. 'electrician near me DFW' — what services dominate the results?\n"
+            "  2. 'electrical repair Rowlett TX' — what specific problems are people searching?\n"
+            "  3. 'panel upgrade Dallas 2025' — any news, seasonal spikes, or competitor campaigns?\n"
+            "  4. 'EV charger installation Dallas' — search volume signals, competitor density?\n"
+            "  5. One additional query based on the research focus topic provided in the context.\n\n"
+            "For each search: report what you ACTUALLY FOUND in the results (top 3 organic results, "
+            "People Also Ask questions, any featured snippets). Do not summarize from memory.\n"
+            "If SerperDevTool is unavailable, say so explicitly and label all trend signals as "
+            "'BASELINE ESTIMATE (live search unavailable)'.\n\n"
+            "REQUIRED OUTPUT SECTION — POST TOPIC QUEUE:\n"
+            "After the trend research, produce a '## RECOMMENDED POST TOPIC QUEUE' section with "
+            "exactly 7 ranked topics. For each topic include:\n"
+            "  - RANK: (1 = highest search demand this week)\n"
+            "  - SERVICE: (specific service name)\n"
+            "  - TREND SIGNAL: (exact search query or People Also Ask question that supports this)\n"
+            "  - DATA SOURCE: (SerperDevTool result / baseline estimate / seasonal)\n"
+            "  - CONTENT ANGLE: (one sentence on what angle will resonate with DFW homeowners)\n\n"
+            "This queue is what the GBP Poster Agent will use to build this week's schedule. "
+            "Make it specific and actionable. Use the imported baseline and any available public evidence. "
+            "Clearly label missing owner-access items."
         ),
         expected_output=(
             "A GBP / Local Rankings Report wrapped in [START:GBP]...[END:GBP] markers, containing: "
-            "status summary, search trend signals this week, ranking notes, GBP issues, "
-            "competitor notes, recommended GBP post topics, recommended actions, ready-to-publish "
-            "GBP drafts, and owner approval needs."
+            "status summary, search trend signals this week (citing actual search results or labeling as estimates), "
+            "ranking notes, GBP issues, competitor notes, RECOMMENDED POST TOPIC QUEUE (7 ranked topics with "
+            "trend signals and data sources), recommended actions, and owner approval needs."
         ),
         agent=gbp_agent,
         output_file=out("gbp_report.md"),
@@ -745,13 +770,11 @@ def build_poster_crew(
         f"{gbp_report}"
     )
 
-    tools = build_tools()
-
     poster_agent = Agent(
         role="Grizzly GBP Poster Agent",
-        goal="Produce a structured 7-day GBP posting schedule using only available (unused) photos from the manifest.",
+        goal="Produce a structured 7-day GBP posting schedule based entirely on the provided research reports.",
         backstory=agent_backstory("gbp-poster-agent.txt"),
-        tools=tools,
+        tools=[],  # no search — all trend data comes from the research crew's reports
         llm=exec_llm,
         verbose=is_verbose(),
     )
@@ -759,8 +782,10 @@ def build_poster_crew(
     poster_task = Task(
         description=(
             f"{poster_context}\n\n"
-            "Use SerperDevTool to pull this week's trending electrical service queries in DFW. "
+            "The CONTENT REPORT and GBP REPORT above contain this week's trending electrical service queries "
+            "and recommended post topics — use them directly. Do not search for additional trend data.\n\n"
             f"Build a {days}-day GBP posting schedule starting from {start_date or 'the next business day'}. "
+            "For TREND_TIE, quote the specific trend signal from the GBP REPORT that drove each post's topic choice. "
             "CRITICAL: Only assign photos from the AVAILABLE PHOTOS list — never repeat a photo "
             "already in the manifest with status used/archived/posted. "
             "Use the DAY/DATE/SERVICE/TOPIC/TREND_TIE/HEADLINE/BODY/CAPTION/PHOTO_FILE/CTA/HASHTAGS/STATUS format. "
@@ -770,7 +795,7 @@ def build_poster_crew(
         ),
         expected_output=(
             f"A {days}-day GBP posting schedule with one structured entry per day, "
-            "followed by: Photo Gaps section, Trend Summary This Week, and Owner Notes."
+            "followed by: Photo Gaps section, Trend Summary This Week (citing research reports), and Owner Notes."
         ),
         agent=poster_agent,
         output_file=out("gbp_posting_schedule.md"),

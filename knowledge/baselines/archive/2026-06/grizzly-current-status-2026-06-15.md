@@ -1,5 +1,6 @@
 # Grizzly Electrical Solutions — Current SEO Status — 2026-06-15
 
+```markdown
 # Grizzly Electrical Solutions — Current SEO Status — 2026-06-15
 
 ## RESOLVED ISSUES
@@ -39,3 +40,4 @@
 - Fixing broken contact forms.  
 - Adjusting From address for Contact Form 7.  
 - Revisiting task T002 "Fix Broken Contact Form on Website".
+```

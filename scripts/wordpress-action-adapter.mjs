@@ -271,10 +271,72 @@ async function resolveContentId(baseUrl, action, contentType) {
   return null;
 }
 
+// Parse blog post content from executor completion deliverable.
+// Expected format: TITLE:/EXCERPT:/TAGS: headers, blank line, then HTML or markdown body.
+function parseDraftFromDeliverable(deliverable, fallbackTitle) {
+  if (!deliverable || !deliverable.trim()) return null;
+  const lines = deliverable.split('\n');
+  let title = fallbackTitle || '';
+  let excerpt = '';
+  let tagNames = [];
+  let htmlStart = 0;
+  for (let i = 0; i < Math.min(lines.length, 12); i++) {
+    const line = lines[i];
+    if (line.startsWith('TITLE:')) { title = line.slice(6).trim(); htmlStart = i + 1; }
+    else if (line.startsWith('EXCERPT:')) { excerpt = line.slice(8).trim(); htmlStart = i + 1; }
+    else if (line.startsWith('TAGS:')) { tagNames = line.slice(5).split(',').map(t => t.trim().replace(/^#/, '')); htmlStart = i + 1; }
+    else if (line.trim() === '' && i > 0) { htmlStart = i + 1; break; }
+  }
+  const bodyText = lines.slice(htmlStart).join('\n').trim();
+  if (!bodyText) return null;
+  const content = bodyText.startsWith('<') ? bodyText : mdToHtml(bodyText);
+  return { title, excerpt, tags: tagNames, content, status: 'draft' };
+}
+
+function mdToHtml(md) {
+  const rawLines = md.split('\n');
+  const out = [];
+  let inUl = false;
+  for (const raw of rawLines) {
+    const line = raw
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.+?)\*/g, '<em>$1</em>')
+      .replace(/\[(.+?)\]\((.+?)\)/g, '<a href="$2">$1</a>');
+    if (/^###\s/.test(line)) {
+      if (inUl) { out.push('</ul>'); inUl = false; }
+      out.push(`<h3>${line.replace(/^###\s+/, '')}</h3>`);
+    } else if (/^##\s/.test(line)) {
+      if (inUl) { out.push('</ul>'); inUl = false; }
+      out.push(`<h2>${line.replace(/^##\s+/, '')}</h2>`);
+    } else if (/^-\s/.test(line)) {
+      if (!inUl) { out.push('<ul>'); inUl = true; }
+      out.push(`<li>${line.replace(/^-\s+/, '')}</li>`);
+    } else if (line.trim() === '') {
+      if (inUl) { out.push('</ul>'); inUl = false; }
+      out.push('');
+    } else {
+      if (inUl) { out.push('</ul>'); inUl = false; }
+      out.push(line);
+    }
+  }
+  if (inUl) out.push('</ul>');
+  return out.join('\n').split(/\n\n+/).map(block => {
+    const b = block.trim();
+    if (!b || /^<(h[23]|ul|li|p)/.test(b)) return b;
+    return `<p>${b.replace(/\n/g, ' ')}</p>`;
+  }).filter(Boolean).join('\n');
+}
+
 async function restContentAction(config, action, live) {
-  const contentType = action.content_type || "page";
+  // blog post actions always create posts, not pages
+  const contentType = action.content_type
+    || (action.action_type === "website_blog_post" ? "post" : "page");
   const isPost = contentType === "post";
-  const draft = action.draft || action.page_draft || {};
+  // draft can come from: action.draft (generate_blog_post flow), action.page_draft,
+  // or the executor crew's completion.deliverable (TITLE/EXCERPT/TAGS + HTML format)
+  const draft = action.draft || action.page_draft
+    || parseDraftFromDeliverable(action.completion?.deliverable, action.title)
+    || {};
 
   const title = draft.title || action.title;
   const content = draft.content || action.content_html || "";

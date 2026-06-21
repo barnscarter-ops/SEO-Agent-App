@@ -25,6 +25,7 @@ If any report is missing, empty, or missing its markers:
 Synthesize all available reports into one Local Presence Manager Plan.
 
 Prioritize in this order:
+0. Weekly blog post on this week's trending service topic (mandatory — always P1, always the first Highest-Priority Action). Pull the topic from the CONTENT REPORT or GBP REPORT trending keyword. Assign to Local Content Production Executor with action_type: website_blog_post.
 1. Residential lead-generating services (troubleshooting, panel replacement, service upgrades, EV chargers, generators, recessed lighting, remodel electrical)
 2. GBP completeness and local ranking improvements
 3. Reputation and review health

@@ -203,7 +203,6 @@ async function scan(inboxFolder) {
         fs.copyFileSync(filePath, destPath);
         entry.path = destPath;
         downloaded++;
-        console.log(`    → Copied to Raw: ${destPath}`);
 
         if (BACKUP_FOLDER) {
           try {
@@ -213,6 +212,14 @@ async function scan(inboxFolder) {
           } catch (e) {
             console.warn(`    Backup failed (Proxmox reachable?): ${e.message}`);
           }
+        }
+
+        // Remove from Inbox after successful copy to Raw (and backup)
+        try {
+          fs.unlinkSync(filePath);
+          console.log(`    → Moved to Raw: ${destPath}`);
+        } catch (e) {
+          console.warn(`    Could not remove from Inbox (${e.message}) — Raw copy is safe`);
         }
       } else {
         skipped++;
@@ -230,7 +237,7 @@ async function scan(inboxFolder) {
   }
 
   console.log(`\n✓ Scan complete`);
-  console.log(`  Moved to Raw pool: ${downloaded}`);
+  console.log(`  Moved to Raw pool (removed from Inbox): ${downloaded}`);
   console.log(`  Skipped (low score): ${skipped}`);
   console.log(`  Total available in Raw pool: ${index.filter(e => e.path && !e.used).length}`);
   console.log(`\n  Low-score photos remain in inbox for manual review: ${inboxFolder}`);

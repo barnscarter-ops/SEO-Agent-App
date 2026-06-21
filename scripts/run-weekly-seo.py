@@ -6,6 +6,7 @@ this week, then kicks off the full SEO research + scheduling pipeline.
 Run by Windows Task Scheduler every Friday at 8:30 AM.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -55,14 +56,42 @@ TOPIC_MAP = {
 }
 
 
+TOPIC_HISTORY_FILE = PROJECT_ROOT / "state" / "topic-history.json"
+TOPIC_HISTORY_WINDOW = 4  # avoid repeating a topic used in the last 4 weeks
+
+
+def load_topic_history() -> list:
+    try:
+        data = json.loads(TOPIC_HISTORY_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_topic_history(history: list, topic: str) -> None:
+    history.append(topic)
+    history = history[-(TOPIC_HISTORY_WINDOW * 2):]
+    TOPIC_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TOPIC_HISTORY_FILE.write_text(json.dumps(history, indent=2), encoding="utf-8")
+
+
 def pick_trending_topic() -> str:
+    history = load_topic_history()
+    recent_topics = set(history[-TOPIC_HISTORY_WINDOW:])
+
+    # Filter candidates to avoid recently used topics
+    fresh_keywords = [kw for kw in CANDIDATE_KEYWORDS if TOPIC_MAP.get(kw, kw) not in recent_topics]
+    if not fresh_keywords:
+        fresh_keywords = CANDIDATE_KEYWORDS
+        print("[auto-topic] All topics used recently — resetting history")
+
     try:
         from pytrends.request import TrendReq
         pytrends = TrendReq(hl="en-US", tz=360)  # CST (UTC-6)
-        scores: dict[str, float] = {}
+        scores: dict = {}
 
         # pytrends only accepts 5 keywords per payload — batch them
-        batches = [CANDIDATE_KEYWORDS[i:i+5] for i in range(0, len(CANDIDATE_KEYWORDS), 5)]
+        batches = [fresh_keywords[i:i+5] for i in range(0, len(fresh_keywords), 5)]
         for batch in batches:
             try:
                 pytrends.build_payload(batch, timeframe="now 7-d", geo="US-TX")
@@ -80,16 +109,19 @@ def pick_trending_topic() -> str:
             ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
             print(f"[auto-topic] Trend scores (Texas, last 7d): {ranked}")
             print(f"[auto-topic] Winner: '{best}' ({scores[best]:.1f})")
-            return TOPIC_MAP.get(best, f"{best} Dallas DFW")
+            topic = TOPIC_MAP.get(best, f"{best} Dallas DFW")
+            save_topic_history(history, topic)
+            return topic
 
     except Exception as e:
         print(f"[auto-topic] pytrends unavailable: {e}")
 
-    # Fallback: rotate through topics by ISO week number so each week is different
+    # Fallback: rotate through fresh topics by ISO week number
     week = date.today().isocalendar()[1]
-    fallback_kw = CANDIDATE_KEYWORDS[week % len(CANDIDATE_KEYWORDS)]
+    fallback_kw = fresh_keywords[week % len(fresh_keywords)]
     fallback_topic = TOPIC_MAP.get(fallback_kw, f"{fallback_kw} Dallas DFW")
-    print(f"[auto-topic] Fallback (week {week}): '{fallback_topic}'")
+    print(f"[auto-topic] Fallback (week {week}, {len(fresh_keywords)} fresh topics): '{fallback_topic}'")
+    save_topic_history(history, fallback_topic)
     return fallback_topic
 
 

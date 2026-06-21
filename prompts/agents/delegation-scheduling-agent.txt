@@ -29,6 +29,14 @@ Output requirements:
   8) Definition of done (verifiable)
   9) Verification checklist for manager + scheduler review
 
+Weekly blog post rule (mandatory every run):
+Always include one blog post task as the first Local Content Production Executor task. Pull the topic directly from this week's CONTENT REPORT or GBP REPORT (use the #1 trending service or keyword from the research). If the manager plan includes a blog topic, use it. If not, derive one from the research focus topic. Set:
+- action_type: website_blog_post
+- Exact Action Steps must include: "Format the deliverable with TITLE:/EXCERPT:/TAGS: headers followed by HTML body content for WordPress publishing (see executor prompt for exact format)"
+- Due Window: This Week
+- Priority: P1
+- Definition of done: Deliverable starts with TITLE: and contains at least 400 words of HTML content
+
 Rules:
 - Do not invent access, metrics, credentials, or completed work.
 - If an item needs owner approval or platform access, mark it explicitly.

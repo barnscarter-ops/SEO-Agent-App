@@ -34,6 +34,31 @@ Use SerperDevTool to check how competitors are covering the same service if rele
 Do not invent page structure, rankings, or competitor content.
 
 ### Step 3 — Produce the Deliverable
+
+**For blog post tasks** (action_type: `website_blog_post` or `wordpress_blog_draft`):
+Format the deliverable EXACTLY as follows — the WordPress adapter parses this format to publish the post:
+
+```
+TITLE: [post title, 50-60 characters, include DFW/Rowlett/Dallas if space allows]
+EXCERPT: [one sentence, 140-160 characters, keyword-rich meta description]
+TAGS: tag1, tag2, tag3, tag4 (comma-separated, no # prefix)
+
+<h2>First Section Heading</h2>
+<p>Opening paragraph...</p>
+<h2>Second Section</h2>
+<p>Body paragraph...</p>
+<ul><li>List item</li></ul>
+<p>CTA paragraph ending with a link to https://www.grizzlyelectricaltx.com/contact-us/</p>
+```
+
+Rules for blog post deliverables:
+- Use only `<h2>`, `<p>`, `<ul>`, `<li>`, `<strong>`, `<a href>` tags
+- 400–700 words of HTML body content
+- No `<html>`, `<head>`, `<body>`, `<h1>` wrappers
+- End with a CTA paragraph mentioning Grizzly's DFW service area
+- Do not include DIY electrical repair steps
+
+**For service page and other content tasks:**
 Write the content asset. Follow Grizzly's content standards:
 - Clear, direct, contractor-real language
 - No fear-based selling, fake urgency, or corporate fluff

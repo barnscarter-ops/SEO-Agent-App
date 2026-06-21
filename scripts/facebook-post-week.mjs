@@ -221,6 +221,8 @@ function resolveVideoPath(post) {
   return path.join(VIDEO_OUTPUT_DIR, `fb-video-${post.date}.mp4`);
 }
 
+let geminiCreditsDepletedFlag = false;
+
 async function generateAllVideos(posts) {
   const videoPosts = posts.filter(p => p.type === 'video');
   console.error(`\nGenerating ${videoPosts.length} videos upfront...`);
@@ -241,7 +243,14 @@ async function generateAllVideos(posts) {
       generateGeminiVideo(prompt, videoPath);
       console.error(`  Day ${post.day}: saved ${path.basename(videoPath)}`);
     } catch (e) {
-      console.error(`  Day ${post.day}: video generation failed (${e.message.slice(0, 120)}) — will post without video`);
+      const errText = (e.stderr ? e.stderr.toString() : '') + e.message;
+      const isCreditsError = errText.includes('prepayment credits') || errText.includes('credits are depleted') || errText.includes('RESOURCE_EXHAUSTED');
+      if (isCreditsError) {
+        geminiCreditsDepletedFlag = true;
+        console.error(`  Day ${post.day}: GEMINI CREDITS DEPLETED — will post without video. Top up at https://aistudio.google.com/`);
+      } else {
+        console.error(`  Day ${post.day}: video generation failed (${e.message.slice(0, 120)}) — will post without video`);
+      }
     }
   }
   console.error('\nAll videos ready.\n');
@@ -794,7 +803,9 @@ async function main() {
     }
   }
 
-  console.log(JSON.stringify({ status: 'complete', results }, null, 2));
+  const output = { status: 'complete', results };
+  if (geminiCreditsDepletedFlag) output.gemini_credits_depleted = true;
+  console.log(JSON.stringify(output, null, 2));
 }
 
 main().catch(e => {
