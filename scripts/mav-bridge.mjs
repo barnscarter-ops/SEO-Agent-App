@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createClient } from '@supabase/supabase-js';
 import xlsx from 'xlsx';
+import { checkFacebookToken } from './facebook-poster.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -67,6 +68,23 @@ async function log(runId, phase, level, message) {
   }
 }
 
+// Structured per-hop error logging (Fix 5). The data path is
+// Vercel → Tailscale → server.mjs → mav-bridge → adapters. When something
+// breaks, this tags WHICH outbound boundary failed so a vague dashboard error
+// can be traced to the exact hop. `hop` is e.g. 'mav-bridge→supabase',
+// 'mav-bridge→openai', 'mav-bridge→subprocess:facebook'.
+async function hopError(runId, phase, hop, message, err) {
+  const detail = err ? `${message}: ${err.message || err}` : message;
+  const rec = { ts: new Date().toISOString(), source: 'mav-bridge', hop, phase, message: detail };
+  console.error(`[mav-bridge][${hop}][error] ${detail}`);
+  console.error(`  ↳ ${JSON.stringify(rec)}`);
+  if (runId) {
+    await supabase.from('run_logs')
+      .insert({ run_id: runId, phase, level: 'error', message: `[${hop}] ${detail}` })
+      .catch((e) => console.error(`[mav-bridge][mav-bridge→supabase][error] could not write hop error: ${e.message}`));
+  }
+}
+
 // ─────────────────────────────────────────────
 // Email alerts
 // ─────────────────────────────────────────────
@@ -87,12 +105,17 @@ async function sendBridgeAlert(subject, body) {
 // Run a phase and capture output
 // ─────────────────────────────────────────────
 
-async function runPhase(runId, phase, exe, args, cwd) {
+async function runPhase(runId, phase, exe, args, cwd, opts = {}) {
+  // Default 15 min. The facebook phase needs more: it can render up to 3 Veo 3
+  // videos sequentially (each up to ~13 min — see facebook-poster VIDEO_GEN_TIMEOUT_MS),
+  // so callers pass a longer timeoutMs to keep Fix 1 effective end-to-end.
+  const timeoutMs = opts.timeoutMs || 15 * 60 * 1000;
   await log(runId, phase, 'info', `Starting: ${exe} ${args.join(' ')}`);
   try {
     const { stdout, stderr } = await execFileAsync(exe, args, {
       cwd: cwd || PROJECT_ROOT,
-      timeout: 15 * 60 * 1000,
+      timeout: timeoutMs,
+      maxBuffer: 16 * 1024 * 1024,
       encoding: 'utf8',
       windowsHide: true,
     });
@@ -103,8 +126,9 @@ async function runPhase(runId, phase, exe, args, cwd) {
     const stdout = e.stdout || '';
     const stderr = e.stderr || '';
     const exitCode = typeof e.code === 'number' ? e.code : -1;
-    const detail = [e.message, stderr, stdout].filter(Boolean).join('\n').slice(0, 1500);
-    await log(runId, phase, 'error', detail);
+    const killed = e.killed ? ` (killed: timed out after ${Math.round(timeoutMs / 1000)}s)` : '';
+    const detail = [e.message + killed, stderr, stdout].filter(Boolean).join('\n').slice(0, 1500);
+    await hopError(runId, phase, `mav-bridge→subprocess:${phase}`, `${exe} failed (exit ${exitCode})${killed}`, { message: detail });
     return { ok: false, stdout, stderr, exitCode, error: detail };
   }
 }
@@ -229,7 +253,9 @@ async function generateDay1VideoPrompt(scheduleFile) {
 
   if (!OPENAI_API_KEY) return get('VIDEO_PROMPT') || null;
 
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+  let res;
+  try {
+    res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
     body: JSON.stringify({
@@ -239,8 +265,13 @@ async function generateDay1VideoPrompt(scheduleFile) {
         { role: 'user', content: `Service: ${service}\nHook: ${hook}\nCaption:\n${caption}` },
       ],
     }),
-  });
+    });
+  } catch (e) {
+    // Tag the OpenAI hop so a network/DNS failure here is distinguishable from a bad response.
+    throw new Error(`[mav-bridge→openai] request failed: ${e.message}`);
+  }
   const json = await res.json();
+  if (json.error) throw new Error(`[mav-bridge→openai] ${json.error.message || 'API error'}`);
   return json.choices?.[0]?.message?.content?.trim() || get('VIDEO_PROMPT') || null;
 }
 
@@ -271,6 +302,21 @@ async function waitForPromptApproval(runId) {
 async function executeApprovedRun(run) {
   const { id: runId } = run;
   await log(runId, 'bridge', 'info', `Executing approved run ${runId}`);
+
+  // ── Fix 4: validate the Facebook Page token before the pipeline runs so a stale
+  // token surfaces as a clear warning/alert instead of a cryptic mid-run failure. ──
+  try {
+    const tok = await checkFacebookToken();
+    await log(runId, 'facebook', tok.level, tok.message);
+    if (tok.level === 'error' || (tok.level === 'warn' && tok.expiresAt)) {
+      await sendBridgeAlert(
+        '⚠️ Grizzly SEO: Facebook Token Needs Attention',
+        `${tok.message}\n\nRegenerate a long-lived Page Access Token at https://developers.facebook.com/tools/explorer and update FB_PAGE_ACCESS_TOKEN in .env, then restart mav-bridge.\n\nRun ID: ${runId}`,
+      );
+    }
+  } catch (e) {
+    await hopError(runId, 'facebook', 'mav-bridge→graph', 'Facebook token check failed', e);
+  }
 
   // ── Step 0: Generate Day 1 video prompt, surface for approval (5-min window) ──
   const scheduleFile = path.join(PROJECT_ROOT, 'outputs', 'facebook_posting_schedule.md');
@@ -320,9 +366,9 @@ async function executeApprovedRun(run) {
       .eq('run_id', runId).eq('platform', 'facebook').eq('status', 'approved');
 
     const result = await runPhase(runId, 'facebook', 'node', [
-      path.join(PROJECT_ROOT, 'scripts', 'facebook-post-week.mjs'),
+      path.join(PROJECT_ROOT, 'scripts', 'facebook-poster.mjs'),
       '--schedule-all', '--time', '09:00',
-    ], PROJECT_ROOT);
+    ], PROJECT_ROOT, { timeoutMs: 45 * 60 * 1000 }); // up to 3 Veo 3 renders + uploads
 
     if (result.ok) {
       // Parse per-post results from JSON output so Day 1 → 'posted', Days 2-7 → 'scheduled'
@@ -388,12 +434,15 @@ async function executeApprovedRun(run) {
       .update({ status: 'posting' })
       .eq('run_id', runId).eq('platform', 'gbp').eq('status', 'approved');
 
-    // Match photos from Raw pool to post topics before syncing to Excel
-    const PHOTO_MATCHER_PATH = path.join(PROJECT_ROOT, 'scripts', 'photo-matcher.mjs');
-    if (fs.existsSync(PHOTO_MATCHER_PATH)) {
-      const matchResult = await runPhase(runId, 'gbp', 'node', [PHOTO_MATCHER_PATH], PROJECT_ROOT);
+    // Pick the best photo per GBP post and rewrite PHOTO_FILE before syncing to Excel.
+    // gbp-photo-pick.mjs is the single source of truth for GBP photos: it discovers
+    // from the Drive-synced GBP Photos folder, scores + matches, and copies winners
+    // to Curated. (Replaces the old photo-scanner → photo-matcher two-step.)
+    const PHOTO_PICK_PATH = path.join(PROJECT_ROOT, 'scripts', 'gbp-photo-pick.mjs');
+    if (fs.existsSync(PHOTO_PICK_PATH)) {
+      const matchResult = await runPhase(runId, 'gbp', 'node', [PHOTO_PICK_PATH], PROJECT_ROOT);
       if (!matchResult.ok) {
-        await log(runId, 'gbp', 'warn', `photo-matcher failed (continuing): ${matchResult.error}`);
+        await log(runId, 'gbp', 'warn', `gbp-photo-pick failed (continuing): ${matchResult.error}`);
       } else {
         await log(runId, 'gbp', 'info', 'Photo matching complete');
       }
@@ -517,7 +566,9 @@ async function poll() {
       .limit(1);
 
     if (error) {
-      console.error('[mav-bridge] Supabase poll error:', error.message);
+      // Tag the Supabase hop so a DB/network failure here is distinct from a
+      // downstream adapter failure (Fix 5).
+      console.error(`[mav-bridge][mav-bridge→supabase][error] poll query failed: ${error.message}`);
       return;
     }
 
@@ -614,7 +665,7 @@ async function poll() {
       }
     }
   } catch (e) {
-    console.error('[mav-bridge] Poll exception:', e.message);
+    console.error(`[mav-bridge][mav-bridge→poll][error] poll exception: ${e.message}`);
   } finally {
     busy = false;
   }
@@ -937,8 +988,10 @@ console.log(`[mav-bridge] Project root: ${PROJECT_ROOT}`);
 
 const httpServer = http.createServer((req, res) => {
   handleHttpRequest(req, res).catch(e => {
-    console.error('[mav-bridge][http] Unhandled error:', e.message);
-    try { sendJsonHttp(res, 500, { error: 'Internal server error' }); } catch {}
+    // Inbound hop: Vercel → Tailscale → server.mjs → here. Tag it so a failure
+    // in request handling is attributable to this boundary (Fix 5).
+    console.error(`[mav-bridge][server.mjs→mav-bridge][error] ${req.method} ${req.url}: ${e.message}`);
+    try { sendJsonHttp(res, 500, { error: 'Internal server error', hop: 'mav-bridge', detail: e.message }); } catch {}
   });
 });
 httpServer.listen(BRIDGE_PORT, '127.0.0.1', () => {

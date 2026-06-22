@@ -55,9 +55,11 @@ GBP_PROFILE_ADAPTER = os.getenv(
 GBP_PROFILE_ADAPTER_TIMEOUT_S = int(os.getenv("GBP_PROFILE_ADAPTER_TIMEOUT_S", "300"))
 FACEBOOK_POSTER_ADAPTER = os.getenv(
     "FACEBOOK_POSTER_ADAPTER",
-    r"C:\Workspace\Active\SEO-Agents-App\scripts\facebook-poster-adapter.mjs",
+    r"C:\Workspace\Active\SEO-Agents-App\scripts\facebook-poster.mjs",
 ).strip()
-FACEBOOK_POSTER_TIMEOUT_S = int(os.getenv("FACEBOOK_POSTER_TIMEOUT_S", "600"))
+# Allow >720s so a slow Veo 3 video render (see gemini-video-generator MAX_POLL_ATTEMPTS)
+# plus upload completes before this subprocess is killed.
+FACEBOOK_POSTER_TIMEOUT_S = int(os.getenv("FACEBOOK_POSTER_TIMEOUT_S", "900"))
 GBP_WORKBOOK_HEADERS = [
     "Date",
     "PostType",

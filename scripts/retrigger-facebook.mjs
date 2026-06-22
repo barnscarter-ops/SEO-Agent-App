@@ -2,7 +2,7 @@
 /**
  * retrigger-facebook.mjs
  * One-time fix: resets Facebook posts to 'approved' and the run to 'approved'
- * so mav-bridge picks it up and runs facebook-post-week.mjs.
+ * so mav-bridge picks it up and runs facebook-poster.mjs.
  *
  * Use when Facebook posts are stuck at 'pending_approval' after a run
  * that completed GBP but never processed Facebook.

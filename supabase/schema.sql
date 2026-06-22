@@ -6,7 +6,9 @@
 -- ─────────────────────────────────────────────
 create table if not exists seo_runs (
   id                    uuid primary key default gen_random_uuid(),
-  week_of               date not null,           -- Monday of the content week
+  week_of               date not null unique,    -- Monday of the content week (one run per week)
+  -- UNIQUE is required for the supabase-sync upsert(onConflict: 'week_of') to dedupe
+  -- re-runs of the same week instead of inserting duplicate rows.
   status                text not null default 'research_running',
   -- research_running | execute_running | pending_approval | approved | executing | done | error
   research_completed_at timestamptz,

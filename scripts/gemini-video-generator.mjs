@@ -25,7 +25,11 @@ if (fs.existsSync(envPath)) {
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const VEO_MODEL = process.env.GEMINI_VEO_MODEL || 'veo-3.0-generate-001';
 const POLL_INTERVAL_MS = 8000;
-const MAX_POLL_ATTEMPTS = 60; // ~8 minutes max (Veo3 can take 5-7 min)
+// Veo 3 can take 10-12 minutes for some prompts. 90 polls × 8s = 720s (12 min)
+// so generation doesn't time out prematurely and fall back to a static image.
+// NOTE: any process that spawns this script must allow >720s (see facebook-poster.mjs
+// VIDEO_GEN_TIMEOUT_MS and mav-bridge.mjs facebook phase timeout).
+const MAX_POLL_ATTEMPTS = 90; // ~12 minutes max
 
 function parseArgs(argv) {
   const args = { prompt: '', output: '', dryRun: false, aspectRatio: '9:16', durationSeconds: 8 };

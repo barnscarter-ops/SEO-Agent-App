@@ -1,13 +1,25 @@
 #!/usr/bin/env node
 /**
  * gbp-photo-pick.mjs
- * Weekly photo picker for GBP posts.
+ * Weekly photo picker for GBP posts. THE single source of truth for GBP photos.
  *
  * Scans the GBP_PHOTOS_FOLDER (default: H:\My Drive\GBP Photos) for new photos,
  * scores them with GPT-4o vision, picks the best match per post in the weekly
  * schedule, and copies the 7 winners straight to GBP_CURATED_FOLDER.
  *
- * Replaces the old photo-scanner → photo-matcher two-step pipeline.
+ * Pipeline (one feed in, one pick out):
+ *   1. Photo source — new job photos land in the Drive "GBP Photos" folder via the
+ *      Google Drive phone app (auto-upload / "Add to Drive" after a job).
+ *      NOTE: the old Google Photos album → Drive sync (grizzly-photos-sync.gs) is
+ *      DEAD and removed — Google removed Photos Library API readonly/album access on
+ *      2025-03-31, so unattended pulls from a Photos album are no longer possible.
+ *   2. Google Drive desktop — mirrors that folder to H:\My Drive\GBP Photos.
+ *   3. THIS script — discover → score (cached) → match → copy to Curated
+ *      → rewrite PHOTO_FILE in outputs/gbp_posting_schedule.md.
+ *   4. mav-bridge.mjs — runs this, then sync-gbp-schedule, then driver.mjs.
+ *
+ * Replaces the old photo-scanner → photo-matcher two-step AND google-photos-sync.mjs
+ * (which used the same dead Photos Library API).
  *
  * Usage:
  *   node gbp-photo-pick.mjs               Run full pick for this week
