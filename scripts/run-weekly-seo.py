@@ -24,7 +24,80 @@ if env_file.exists():
         key, _, val = line.partition("=")
         os.environ.setdefault(key.strip(), val.strip())
 
-SEO_AGENTS_EXE = Path(sys.executable).parent / "Scripts" / "seo-agents.exe"
+OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+# Start/finish marker the SEO monitor keys off to detect a "no-show" run.
+# Written the moment this wrapper starts, so a run that never fires is detectable
+# even before any Supabase row exists.
+RUNNER_HEALTH_FILE = OUTPUTS_DIR / "weekly-runner-health.json"
+RUNNER_LOG_FILE = OUTPUTS_DIR / f"weekly-runner-{date.today().isoformat()}.log"
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def log_line(msg: str) -> None:
+    """Print to console (captured by Task Scheduler) and append to the day log."""
+    print(msg, flush=True)
+    try:
+        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        with RUNNER_LOG_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(msg.rstrip("\n") + "\n")
+    except Exception:
+        pass
+
+
+def write_runner_health(status: str, topic: str = "", returncode=None, error: str = "") -> None:
+    """Record the wrapper's own status so the monitor can alarm on a no-show.
+
+    status: 'started' | 'success' | 'failed'
+    """
+    try:
+        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "status": status,
+            "at": _now_iso(),
+            "date": date.today().isoformat(),
+            "topic": topic or None,
+            "returncode": returncode,
+            "error": error or None,
+            "log_file": str(RUNNER_LOG_FILE),
+        }
+        RUNNER_HEALTH_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[run-weekly-seo] WARNING: could not write runner health: {e}", flush=True)
+
+
+def resolve_seo_agents_cmd() -> list:
+    """Resolve a working command to launch the crew.
+
+    The old code assumed ``sys.executable.parent / "Scripts" / "seo-agents.exe"``,
+    which is wrong under a venv (it doubles "Scripts") and is never exercised by a
+    manual dry run — so a broken path stayed invisible until the scheduled Friday
+    run. Try the console script in the likely locations, then fall back to invoking
+    the package as a module with whatever interpreter is available.
+    """
+    exe_candidates = [
+        Path(sys.executable).parent / "seo-agents.exe",              # interpreter dir (system or venv Scripts)
+        Path(sys.executable).parent / "Scripts" / "seo-agents.exe",  # legacy assumption
+        PROJECT_ROOT / ".venv" / "Scripts" / "seo-agents.exe",       # Windows venv
+        PROJECT_ROOT / ".venv" / "bin" / "seo-agents",               # POSIX venv
+    ]
+    for cand in exe_candidates:
+        if cand.exists():
+            return [str(cand)]
+
+    # Fallback: run as a module with the venv python if we can find it, else current python.
+    py_candidates = [
+        PROJECT_ROOT / ".venv" / "Scripts" / "python.exe",
+        PROJECT_ROOT / ".venv" / "bin" / "python",
+        Path(sys.executable),
+    ]
+    py = next((str(p) for p in py_candidates if Path(p).exists()), sys.executable)
+    log_line(f"[run-weekly-seo] seo-agents.exe not found in any known location — "
+             f"falling back to module invocation: {py} -m seo_agents.main")
+    return [py, "-m", "seo_agents.main"]
 
 # Candidate service topics — pytrends compares these and picks the hottest this week.
 # Keep phrases short (1–3 words); geo is scoped to Texas below.
@@ -126,18 +199,43 @@ def pick_trending_topic() -> str:
 
 
 def main() -> None:
-    print(f"[run-weekly-seo] Starting — {date.today().isoformat()} (Friday run)")
-    topic = pick_trending_topic()
-    print(f"[run-weekly-seo] Launching research: \"{topic}\"")
+    # Mark "started" immediately so the monitor can tell a real run from a no-show,
+    # even if topic selection or the crew launch fails below.
+    write_runner_health("started")
+    log_line(f"[run-weekly-seo] Starting — {date.today().isoformat()} (Friday run)")
 
-    if not SEO_AGENTS_EXE.exists():
-        print(f"[run-weekly-seo] ERROR: seo-agents not found at {SEO_AGENTS_EXE}")
+    try:
+        topic = pick_trending_topic()
+    except Exception as e:
+        log_line(f"[run-weekly-seo] ERROR: topic selection failed: {e}")
+        write_runner_health("failed", error=f"topic selection: {e}")
         sys.exit(1)
 
-    result = subprocess.run(
-        [str(SEO_AGENTS_EXE), "research", topic],
-        cwd=str(PROJECT_ROOT),
-    )
+    log_line(f"[run-weekly-seo] Launching research: \"{topic}\"")
+    cmd = resolve_seo_agents_cmd() + ["research", topic]
+    log_line(f"[run-weekly-seo] Command: {cmd}")
+
+    # Pass our env (which now includes the parsed .env) explicitly, and make sure the
+    # package is importable when we fall back to `-m seo_agents.main`.
+    child_env = os.environ.copy()
+    src_path = str(PROJECT_ROOT / "src")
+    child_env["PYTHONPATH"] = src_path + os.pathsep + child_env.get("PYTHONPATH", "")
+
+    try:
+        result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=child_env)
+    except FileNotFoundError as e:
+        log_line(f"[run-weekly-seo] ERROR: could not launch crew ({e}). "
+                 f"Check that the .venv exists and `pip install -e .` has been run.")
+        write_runner_health("failed", topic=topic, error=str(e))
+        sys.exit(1)
+
+    if result.returncode == 0:
+        log_line(f"[run-weekly-seo] Research launch completed (exit 0).")
+        write_runner_health("success", topic=topic, returncode=0)
+    else:
+        log_line(f"[run-weekly-seo] Research crew exited non-zero: {result.returncode}")
+        write_runner_health("failed", topic=topic, returncode=result.returncode,
+                            error=f"crew exit {result.returncode}")
     sys.exit(result.returncode)
 
 

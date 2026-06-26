@@ -45,6 +45,14 @@ const MCC_PORT            = parseInt(process.env.MCC_PORT || '3000', 10);
 const POLL_MS             = 30_000;
 const GBP_ARCHIVE_FOLDER  = process.env.GBP_ARCHIVE_FOLDER || 'M:\\backups\\gbp-archive';
 
+// Expected weekly run: Task Scheduler launches run-weekly-seo.py at 8:30 local.
+// If the wrapper hasn't written its "started" marker by NO_SHOW_DEADLINE (local
+// HH:mm) on the expected day-of-week, the run never fired — alert once so a
+// no-show is never silent. Defaults: Friday (5), 09:00 local.
+const NO_SHOW_DEADLINE_HHMM = process.env.SEO_NO_SHOW_DEADLINE || '09:00';
+const EXPECTED_RUN_DOW      = parseInt(process.env.SEO_RUN_DOW ?? '5', 10); // 0=Sun … 5=Fri
+const RUNNER_HEALTH_FILE    = path.join(PROJECT_ROOT, 'outputs', 'weekly-runner-health.json');
+
 // Parse --run-hours arg
 let RUN_DURATION_HOURS = 14;
 const runHoursArg = process.argv.indexOf('--run-hours');
@@ -79,6 +87,7 @@ let lastKnownRunId = null;
 let bridgeDownCount = 0;
 let dashboardDownCount = 0;
 let startTime = Date.now();
+let resurrectAttempted = false;           // only try `pm2 resurrect` once per monitor run
 
 // ── Supabase helpers ──────────────────────────────────────────────────────────
 function sbFetch(path, method = 'GET', body = null) {
@@ -152,6 +161,20 @@ function pm2Restart(name) {
     return true;
   } catch (e) {
     log('error', `pm2 restart failed for ${name}`, { error: e.message });
+    return false;
+  }
+}
+
+// Cold-boot recovery: `pm2 restart` only works on processes the daemon already
+// knows about. After a reboot where PM2 never resurrected (the common Windows
+// case), the process list is empty and restart is useless — we must reload the
+// saved dump with `pm2 resurrect`. Tried at most once per monitor run.
+function pm2Resurrect() {
+  try {
+    execSync('pm2 resurrect', { encoding: 'utf8', timeout: 30000, windowsHide: true });
+    return true;
+  } catch (e) {
+    log('error', 'pm2 resurrect failed', { error: e.message });
     return false;
   }
 }
@@ -295,8 +318,33 @@ async function checkMCCDashboard() {
 }
 
 async function checkPM2Processes() {
-  const procs = pm2List();
+  let procs = pm2List();
   const targets = ['mav-bridge', 'mav-console', 'prometheus-sync'];
+
+  // Cold-boot recovery: if core processes are entirely ABSENT from the daemon
+  // (not merely stopped), PM2 most likely never resurrected after a reboot — the
+  // exact failure that takes MCC down on Friday. `pm2 restart` can't help here;
+  // reload the saved dump once with `pm2 resurrect`, then re-read.
+  const core = ['mav-bridge', 'mav-console'];
+  const missingCore = core.filter(name => !procs.find(p => p.name === name));
+  if (missingCore.length && !resurrectAttempted) {
+    resurrectAttempted = true;
+    log('fix', 'Core PM2 processes missing — attempting cold-boot recovery (pm2 resurrect)', { missing: missingCore });
+    const ok = pm2Resurrect();
+    procs = pm2List();
+    const stillMissing = core.filter(name => !procs.find(p => p.name === name));
+    if (ok && stillMissing.length === 0) {
+      await sendAlert('Auto-fixed: pm2 resurrect restored processes',
+        `Core processes (${missingCore.join(', ')}) were missing from PM2 — likely an un-resurrected reboot — and were restored via "pm2 resurrect".\n\nMonitor log: ${logFile}`);
+    } else {
+      await alertOnce('pm2-resurrect-failed',
+        'FAILED: core PM2 processes missing and pm2 resurrect did not restore them',
+        `Still missing after resurrect: ${stillMissing.join(', ') || '(resurrect reported an error)'}\n\n` +
+        `This usually means PM2 has no saved dump (run "pm2 save" once after starting everything) or the PM2 daemon is not running.\n\n` +
+        `Recover manually on CartersPC:\n  pm2 resurrect\n  # or, if there is no saved dump:\n  pm2 start C:\\Workspace\\Active\\MCC\\ecosystem.config.cjs\n  pm2 save\n\nMonitor log: ${logFile}`);
+    }
+  }
+
   for (const name of targets) {
     const proc = procs.find(p => p.name === name);
     if (!proc) { log('warn', `PM2 process not found: ${name}`); continue; }
@@ -426,6 +474,46 @@ async function checkPostStatuses(runId) {
   log('info', `Posts: ${JSON.stringify(byStatus)}`);
 }
 
+// ── No-show detection ───────────────────────────────────────────────────────
+function localHHMM(d) {
+  // Monitor runs on CartersPC, so getHours() is already local (CST/CDT).
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+// Alarm if the weekly run never even started. Keys off the wrapper's start marker
+// (weekly-runner-health.json), which run-weekly-seo.py writes the instant it
+// launches — so this fires even before any Supabase row exists. Fills the gap
+// where checkRunStatus() only ever alerts on runs that started and THEN failed.
+async function checkRunStarted() {
+  const now = new Date();
+  if (now.getDay() !== EXPECTED_RUN_DOW) return;          // only on the scheduled day
+  if (localHHMM(now) < NO_SHOW_DEADLINE_HHMM) return;     // give the run until the deadline
+
+  let health = null;
+  try { health = JSON.parse(fs.readFileSync(RUNNER_HEALTH_FILE, 'utf8')); } catch { /* missing/unreadable */ }
+
+  const startedToday = health && health.date === today &&
+    ['started', 'success', 'failed'].includes(health.status);
+
+  if (health && health.date === today && health.status === 'failed') {
+    await alertOnce(`runner-failed-${today}`,
+      `SEO weekly runner FAILED at launch — ${today}`,
+      `run-weekly-seo.py marked the run "failed" before/at crew launch.\n\nError: ${health.error || '(none)'}\nReturn code: ${health.returncode}\nRunner log: ${health.log_file || '(see outputs/)'}\n\nMonitor log: ${logFile}`);
+    return;
+  }
+
+  if (!startedToday) {
+    await alertOnce(`run-no-show-${today}`,
+      `SEO weekly run DID NOT START (no-show) — ${today}`,
+      `It is past ${NO_SHOW_DEADLINE_HHMM} local on the scheduled run day and run-weekly-seo.py never wrote a start marker (${RUNNER_HEALTH_FILE}).\n\n` +
+      `That means the Windows Task Scheduler job never launched the wrapper. Most common causes after a reboot:\n` +
+      `  • The task is set to "Run only when user is logged on" and no one logged in\n` +
+      `  • "Run task as soon as possible after a scheduled start is missed" is unchecked\n` +
+      `  • The machine was asleep and "Wake the computer to run this task" is unchecked\n\n` +
+      `Check Task Scheduler → History (Last Run Result), then run scripts/setup-scheduled-tasks.ps1 to re-register with reboot-proof settings.\n\nMonitor log: ${logFile}`);
+  }
+}
+
 // ── Main poll loop ─────────────────────────────────────────────────────────────
 async function poll() {
   try {
@@ -435,6 +523,7 @@ async function poll() {
       checkPM2Processes(),
     ]);
     await checkMDrive();
+    await checkRunStarted();
     await checkRunStatus();
   } catch (e) {
     log('error', 'Unhandled poll exception', { error: e.message, stack: e.stack?.slice(0, 500) });

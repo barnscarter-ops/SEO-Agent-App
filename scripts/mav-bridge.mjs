@@ -593,13 +593,19 @@ async function poll() {
     }
 
     // ── Daily GBP poster ─────────────────────────
-    // Run once per calendar day after 9 AM CST/CDT.
-    // CDT = UTC-5 (summer), CST = UTC-6 (winter). Using -5 for CDT.
-    // todayDate uses the same offset so it never rolls to the next UTC day early.
+    // Run once per calendar day after 9 AM Central. Derive the Central date/hour
+    // straight from the IANA tz (DST-aware) instead of a hardcoded UTC offset —
+    // the old `CDT_OFFSET = 5` was wrong all winter (CST is UTC-6) and silently
+    // shifted the daily post window by an hour.
     const nowUtc = new Date();
-    const CDT_OFFSET = 5; // hours behind UTC (CDT); change to 6 in winter (CST)
-    const cstHour = (nowUtc.getUTCHours() - CDT_OFFSET + 24) % 24;
-    const todayDate = new Date(nowUtc.getTime() - CDT_OFFSET * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const ctParts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Chicago', hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit',
+    }).formatToParts(nowUtc);
+    const ctp = (t) => ctParts.find((p) => p.type === t)?.value;
+    const todayDate = `${ctp('year')}-${ctp('month')}-${ctp('day')}`;
+    let cstHour = parseInt(ctp('hour'), 10);
+    if (cstHour === 24) cstHour = 0; // some ICU builds emit 24 at midnight
     if (cstHour >= 9 && lastDailyGbpDate !== todayDate) {
       lastDailyGbpDate = todayDate;
       const { data: todayGbp } = await supabase
