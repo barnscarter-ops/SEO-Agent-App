@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createClient } from '@supabase/supabase-js';
+import { normalizePhotoFile } from './lib/schedule-text.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -83,7 +84,7 @@ function parseFacebookSchedule(text) {
       body: stripMd(get('BODY')),
       cta: stripMd(get('CTA')),
       hashtags: get('HASHTAGS') || null,
-      photo_file: get('PHOTO_FILE') || null,
+      photo_file: normalizePhotoFile(get('PHOTO_FILE')) || null,
       video_prompt: get('VIDEO_PROMPT') || null,
       status: 'pending_approval',
     };
@@ -112,7 +113,7 @@ function parseGbpSchedule(text) {
       body: get('BODY'),
       cta: get('CTA'),
       hashtags: null,
-      photo_file: get('PHOTO_FILE') || null,
+      photo_file: normalizePhotoFile(get('PHOTO_FILE')) || null,
       video_prompt: null,
       status: 'pending_approval',
     };
