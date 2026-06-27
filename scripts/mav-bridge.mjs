@@ -22,6 +22,7 @@ import xlsx from 'xlsx';
 import { checkFacebookToken } from './facebook-poster.mjs';
 import { mediaStatusFor, bucketStatus, isStuck, describeAction, agentFor } from './lib/action-enrich.mjs';
 import { makeAlertStore } from './lib/alert-store.mjs';
+import { makeRunPhase } from './lib/run-phase.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -138,33 +139,7 @@ async function notifyAlert({ runId, actionId, faultType, title, detail }) {
 // Run a phase and capture output
 // ─────────────────────────────────────────────
 
-async function runPhase(runId, phase, exe, args, cwd, opts = {}) {
-  // Default 15 min. The facebook phase needs more: it can render up to 3 Veo 3
-  // videos sequentially (each up to ~13 min — see facebook-poster VIDEO_GEN_TIMEOUT_MS),
-  // so callers pass a longer timeoutMs to keep Fix 1 effective end-to-end.
-  const timeoutMs = opts.timeoutMs || 15 * 60 * 1000;
-  await log(runId, phase, 'info', `Starting: ${exe} ${args.join(' ')}`);
-  try {
-    const { stdout, stderr } = await execFileAsync(exe, args, {
-      cwd: cwd || PROJECT_ROOT,
-      timeout: timeoutMs,
-      maxBuffer: 16 * 1024 * 1024,
-      encoding: 'utf8',
-      windowsHide: true,
-    });
-    if (stderr) await log(runId, phase, 'info', stderr.slice(0, 2000));
-    await log(runId, phase, 'info', `Done: ${stdout.slice(0, 500)}`);
-    return { ok: true, stdout, stderr, exitCode: 0 };
-  } catch (e) {
-    const stdout = e.stdout || '';
-    const stderr = e.stderr || '';
-    const exitCode = typeof e.code === 'number' ? e.code : -1;
-    const killed = e.killed ? ` (killed: timed out after ${Math.round(timeoutMs / 1000)}s)` : '';
-    const detail = [e.message + killed, stderr, stdout].filter(Boolean).join('\n').slice(0, 1500);
-    await hopError(runId, phase, `mav-bridge→subprocess:${phase}`, `${exe} failed (exit ${exitCode})${killed}`, { message: detail });
-    return { ok: false, stdout, stderr, exitCode, error: detail };
-  }
-}
+const runPhase = makeRunPhase({ log, hopError, projectRoot: PROJECT_ROOT });
 
 // ─────────────────────────────────────────────
 // GBP Excel + photo archive helpers
