@@ -22,7 +22,7 @@ if env_file.exists():
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, val = line.partition("=")
-        os.environ.setdefault(key.strip(), val.strip())
+        os.environ[key.strip()] = val.strip()  # force override (system env may have wrong key)
 
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 # Start/finish marker the SEO monitor keys off to detect a "no-show" run.

@@ -193,8 +193,7 @@ def load_previous_run_context(max_runs: int = 2) -> str:
 def _call_local_llm(prompt: str, max_tokens: int = 2000) -> str:
     """Call the local llama-server (or configured API base) directly.
 
-    Falls back to the OpenAI API if the local server is unreachable and
-    OPENAI_API_KEY is set. Strips Qwen3 <think> blocks automatically.
+    Uses OPENROUTER_API_KEY for auth. Strips Qwen3 <think> blocks automatically.
     """
     import re
     import urllib.error
@@ -203,8 +202,9 @@ def _call_local_llm(prompt: str, max_tokens: int = 2000) -> str:
     def _strip_think(text: str) -> str:
         return re.sub(r"(?s)<think>.*?</think>", "", text).strip()
 
-    api_base = os.getenv("CREWAI_RESEARCH_API_BASE", "http://127.0.0.1:8080/v1").rstrip("/")
-    model = os.getenv("CREWAI_RESEARCH_MODEL", "qwen3-14b")
+    api_base = os.getenv("CREWAI_RESEARCH_API_BASE", "https://openrouter.ai/api/v1").rstrip("/")
+    _raw_model = os.getenv("CREWAI_RESEARCH_MODEL", "openrouter/z-ai/glm-5.2")
+    model = _raw_model.replace("openrouter/", "", 1) if _raw_model.startswith("openrouter/") else _raw_model
     payload = json.dumps({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -212,40 +212,38 @@ def _call_local_llm(prompt: str, max_tokens: int = 2000) -> str:
         "max_tokens": max_tokens,
     }).encode()
 
-    # Try local / configured API base first
+    # Call OpenRouter API
+    _or_error = None
     try:
         req = urllib.request.Request(
             f"{api_base}/chat/completions",
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY', '')}",
+            },
         )
         with urllib.request.urlopen(req, timeout=120) as resp:
             data = json.loads(resp.read())
-        return _strip_think(data["choices"][0]["message"]["content"])
-    except Exception as local_err:
-        pass  # fall through to OpenAI
+        content = data["choices"][0]["message"]["content"]
+        if content is None:
+            # GLM 5.2 reasoning model may return None for content if all tokens went to reasoning
+            raise RuntimeError("Model returned null content (try increasing max_tokens)")
+        return _strip_think(content)
+    except Exception as err:
+        _or_error = err
 
-    # OpenAI fallback
-    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not openai_key:
+    # If we get here, the OpenRouter request failed
+    or_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if not or_key:
         raise RuntimeError(
-            "Local LLM unreachable and OPENAI_API_KEY is not set. "
-            "Start llama-server or add your OpenAI key to .env before running compact-baselines."
+            "OpenRouter request failed and OPENROUTER_API_KEY is not set. "
+            "Add your OpenRouter key to .env before running compact-baselines."
         )
-    payload_oai = json.dumps({
-        "model": "gpt-4o-mini",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1,
-        "max_tokens": max_tokens,
-    }).encode()
-    req_oai = urllib.request.Request(
-        "https://api.openai.com/v1/chat/completions",
-        data=payload_oai,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {openai_key}"},
+    raise RuntimeError(
+        f"OpenRouter request failed: {_or_error}. "
+        f"Check OPENROUTER_API_KEY and network connectivity."
     )
-    with urllib.request.urlopen(req_oai, timeout=60) as resp:
-        data = json.loads(resp.read())
-    return _strip_think(data["choices"][0]["message"]["content"])
 
 
 def generate_blog_post(topic: str, keywords: str = "", status: str = "draft") -> dict:
@@ -703,7 +701,7 @@ def _run_execute_pipeline() -> None:
 
 def main() -> None:
     reconfigure_stdio()
-    load_dotenv()
+    load_dotenv(override=True)
     args = parse_args()
     ensure_dirs()
 
@@ -726,7 +724,11 @@ def main() -> None:
 
         # Compact baselines first so agents don't re-recommend completed items
         print("\n🗜  Compacting baselines before research...")
-        compact_result = compact_baselines()
+        try:
+            compact_result = compact_baselines()
+        except Exception as _compact_err:
+            print(f"   WARNING: Baseline compaction failed (non-fatal): {_compact_err}")
+            compact_result = {"status": "skipped"}
         if compact_result["status"] == "compacted":
             print(f"   ✅ Baselines compacted: {len(compact_result['archived_files'])} files → {compact_result['output']} ({compact_result['reduction_pct']}% smaller)")
         elif compact_result["status"] == "nothing_to_compact":
