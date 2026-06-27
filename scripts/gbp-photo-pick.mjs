@@ -38,6 +38,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizePhotoFile } from './lib/schedule-text.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -96,7 +97,7 @@ function parseSchedule(text) {
       caption: get('CAPTION'),
       cta: get('CTA'),
       hashtags: get('HASHTAGS'),
-      photo_file: get('PHOTO_FILE'),
+      photo_file: normalizePhotoFile(get('PHOTO_FILE')),
     });
   }
   return posts;
