@@ -18,11 +18,11 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createClient } from '@supabase/supabase-js';
-import xlsx from 'xlsx';
 import { checkFacebookToken } from './facebook-poster.mjs';
 import { mediaStatusFor, bucketStatus, isStuck, describeAction, agentFor } from './lib/action-enrich.mjs';
 import { makeAlertStore } from './lib/alert-store.mjs';
 import { makeRunPhase } from './lib/run-phase.mjs';
+import { runGbpForApprovedRun, runDailyGbp, centralDateHour } from './lib/gbp-runner.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -45,8 +45,12 @@ const SEO_AGENTS_EXE = process.env.SEO_AGENTS_EXE
   || 'C:\\Users\\carte\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\seo-agents.exe';
 const PENDING_PROMPT_FILE = path.join(PROJECT_ROOT, 'outputs', 'pending_prompt.json');
 const GBP_POSTER_PATH = 'C:\\Users\\carte\\.claude\\skills\\gbp-poster\\driver.mjs';
-const GBP_WORKBOOK_PATH = process.env.GBP_WORKBOOK_PATH || '';
-const GBP_ARCHIVE_FOLDER = process.env.GBP_ARCHIVE_FOLDER || 'M:\\backups\\gbp-archive';
+// GBP is owned by the user-session gbp-worker (Scheduled Task). The service does NO
+// GBP by default. Flip MAV_BRIDGE_GBP to 'on' ONLY as a rollback, and stop gbp-worker
+// first to avoid double-posting. See docs/runbooks/gbp-worker.md.
+const GBP_ON = (process.env.MAV_BRIDGE_GBP || 'off').toLowerCase() === 'on';
+const PHOTO_PICK_PATH = path.join(PROJECT_ROOT, 'scripts', 'gbp-photo-pick.mjs');
+const GBP_PATHS = { photoPick: PHOTO_PICK_PATH, gbpPoster: GBP_POSTER_PATH, seoAgentsExe: SEO_AGENTS_EXE };
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const SMTP_FROM = process.env.SMTP_FROM || '';
 const SMTP_TO = process.env.SMTP_TO || '';
@@ -140,100 +144,6 @@ async function notifyAlert({ runId, actionId, faultType, title, detail }) {
 // ─────────────────────────────────────────────
 
 const runPhase = makeRunPhase({ log, hopError, projectRoot: PROJECT_ROOT });
-
-// ─────────────────────────────────────────────
-// GBP Excel + photo archive helpers
-// ─────────────────────────────────────────────
-
-function excelDateToIso(value) {
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
-  if (typeof value === 'number') {
-    const parsed = xlsx.SSF.parse_date_code(value);
-    if (parsed) return `${parsed.y}-${String(parsed.m).padStart(2, '0')}-${String(parsed.d).padStart(2, '0')}`;
-  }
-  return String(value || '').slice(0, 10);
-}
-
-function parseDriverJson(stdout) {
-  try {
-    const lastLine = (stdout || '').trim().split('\n').filter(l => l.trim().startsWith('{')).pop();
-    return lastLine ? JSON.parse(lastLine) : {};
-  } catch {
-    return {};
-  }
-}
-
-function gbpNeedsVerificationMessage(parsed = {}) {
-  const attempts = parsed.verificationAttempts || 5;
-  const snapshot = parsed.verificationSnapshot?.textFile || parsed.verificationSnapshot?.screenshot || '';
-  const suffix = snapshot ? ` Snapshot: ${snapshot}` : '';
-  return `GBP post was submitted but not verified after ${attempts} 60-second snapshot checks. Check manually before retrying.${suffix}`;
-}
-
-// Called only after driver.mjs verifies the post is visible.
-// exit 0 (verified) → mark Posted=TRUE in Excel + move photo to archive
-async function markGbpPostedAndArchive(postDate, exitCode, runId) {
-  if (exitCode !== 0) return;
-  if (!GBP_WORKBOOK_PATH) {
-    console.log('[mav-bridge][gbp] GBP_WORKBOOK_PATH not set — skipping Excel update');
-    return;
-  }
-  if (!fs.existsSync(GBP_WORKBOOK_PATH)) {
-    await log(runId, 'gbp', 'warn', `GBP workbook not found: ${GBP_WORKBOOK_PATH}`);
-    return;
-  }
-
-  try {
-    const workbook = xlsx.readFile(GBP_WORKBOOK_PATH);
-    const sheetName = workbook.SheetNames.includes('Posts') ? 'Posts' : workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
-    const rows = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-    if (!rows.length) return;
-
-    const header = rows[0].map(h => String(h).trim());
-    const dateCol = header.findIndex(h => h.toLowerCase() === 'date');
-    const postedCol = header.findIndex(h => h.toLowerCase() === 'posted');
-    const photoCol = header.findIndex(h =>
-      h === 'AssetIdOrDescription' || h === 'Related Picture' || h.toLowerCase().includes('asset')
-    );
-
-    if (dateCol === -1) {
-      await log(runId, 'gbp', 'warn', 'GBP workbook: Date column not found — check sheet column names');
-      return;
-    }
-
-    let targetRow = -1;
-    let photoPath = '';
-    for (let i = 1; i < rows.length; i++) {
-      if (excelDateToIso(rows[i][dateCol]) === postDate) {
-        targetRow = i;
-        if (photoCol >= 0) photoPath = String(rows[i][photoCol] || '').trim();
-        break;
-      }
-    }
-
-    if (targetRow === -1) {
-      await log(runId, 'gbp', 'warn', `GBP workbook: no row found for ${postDate}`);
-      return;
-    }
-
-    if (postedCol >= 0) {
-      sheet[xlsx.utils.encode_cell({ r: targetRow, c: postedCol })] = { t: 'b', v: true };
-      xlsx.writeFile(workbook, GBP_WORKBOOK_PATH);
-      await log(runId, 'gbp', 'info', `Excel Posted=TRUE set for ${postDate}`);
-    }
-
-    if (photoPath && fs.existsSync(photoPath)) {
-      const monthDir = path.join(GBP_ARCHIVE_FOLDER, postDate.slice(0, 7));
-      fs.mkdirSync(monthDir, { recursive: true });
-      const dest = path.join(monthDir, path.basename(photoPath));
-      fs.renameSync(photoPath, dest);
-      await log(runId, 'gbp', 'info', `Photo archived: ${path.basename(photoPath)} → ${monthDir}`);
-    }
-  } catch (e) {
-    await log(runId, 'gbp', 'warn', `markGbpPostedAndArchive error: ${e.message}`);
-  }
-}
 
 // ─────────────────────────────────────────────
 // Handle an approved run
@@ -358,22 +268,6 @@ async function executeApprovedRun(run) {
 
   let allOk = true;
 
-  // ── 0. GBP photo curation (must run BEFORE Facebook) ───────────
-  // gbp-photo-pick discovers photos from the Drive-synced GBP Photos folder,
-  // scores + matches them to the schedule, copies winners to GBP_CURATED_FOLDER,
-  // and rewrites PHOTO_FILE. It must precede the Facebook phase: when a FB video
-  // day's Veo render fails, facebook-poster falls back to the same-date curated
-  // photo (curatedPhotoForDate), which only exists once this has run for the week.
-  const PHOTO_PICK_PATH = path.join(PROJECT_ROOT, 'scripts', 'gbp-photo-pick.mjs');
-  if (fs.existsSync(PHOTO_PICK_PATH)) {
-    const matchResult = await runPhase(runId, 'gbp', 'node', [PHOTO_PICK_PATH], PROJECT_ROOT);
-    if (!matchResult.ok) {
-      await log(runId, 'gbp', 'warn', `gbp-photo-pick failed (continuing): ${matchResult.error}`);
-    } else {
-      await log(runId, 'gbp', 'info', 'Photo curation complete (curated folder populated for GBP + FB fallback)');
-    }
-  }
-
   // ── 1. Facebook posts ──────────────────────────────────────────
   const { data: fbPosts } = await supabase
     .from('weekly_posts')
@@ -444,92 +338,18 @@ async function executeApprovedRun(run) {
     }
   }
 
-  // ── 2. GBP posts ───────────────────────────────────────────────
-  // Writes content to Excel workbook, then posts each date to GBP via Playwright driver.
-  const { data: gbpPosts } = await supabase
-    .from('weekly_posts')
-    .select('*')
-    .eq('run_id', runId)
-    .eq('platform', 'gbp')
-    .eq('status', 'approved');
-
-  if (gbpPosts?.length) {
-    await log(runId, 'gbp', 'info', `Scheduling ${gbpPosts.length} GBP posts`);
-    await supabase.from('weekly_posts')
-      .update({ status: 'posting' })
+  // ── 2. GBP posts (owned by gbp-worker; service only acts if MAV_BRIDGE_GBP=on) ──
+  if (GBP_ON) {
+    const { data: gbpPosts } = await supabase
+      .from('weekly_posts').select('*')
       .eq('run_id', runId).eq('platform', 'gbp').eq('status', 'approved');
-
-    // (Photo curation already ran before the Facebook phase — see section 0.)
-
-    // Sync posts to Excel workbook (reads updated PHOTO_FILE paths from schedule)
-    const syncResult = await runPhase(runId, 'gbp', SEO_AGENTS_EXE, ['sync-gbp-schedule'], PROJECT_ROOT);
-    if (!syncResult.ok) {
-      await log(runId, 'gbp', 'error', `sync-gbp-schedule failed: ${syncResult.error}`);
-      await supabase.from('weekly_posts')
-        .update({ status: 'error', error: syncResult.error })
-        .eq('run_id', runId).eq('platform', 'gbp').eq('status', 'posting');
-      allOk = false;
-    } else {
-      // Post Day 1 immediately, schedule Days 2-7 for their dates
-      const day1Post = gbpPosts.find(p => p.day === 1);
-
-      if (day1Post) {
-        await log(runId, 'gbp', 'info', `Posting Day 1 GBP immediately...`);
-        const result = await runPhase(runId, 'gbp', 'node', [GBP_POSTER_PATH, '--date', day1Post.post_date], PROJECT_ROOT);
-        // Only exit 0 counts as posted: the driver polls verification before
-        // returning success. Exit 3 is submitted but unverified and must not
-        // update posted state.
-        const gbpOk = result.exitCode === 0;
-        if (gbpOk) {
-          try {
-            const parsed = parseDriverJson(result.stdout);
-            await supabase.from('weekly_posts')
-              .update({ status: 'posted', error: null, posted_at: new Date().toISOString(), platform_post_id: parsed.postUrl || null })
-              .eq('id', day1Post.id);
-            await log(runId, 'gbp', 'info', `Day 1 GBP posted (exit ${result.exitCode})`);
-          } catch {
-            await supabase.from('weekly_posts')
-              .update({ status: 'posted', posted_at: new Date().toISOString() })
-              .eq('id', day1Post.id);
-          }
-          await markGbpPostedAndArchive(day1Post.post_date, result.exitCode, runId);
-        } else if (result.exitCode === 3) {
-          const parsed = parseDriverJson(result.stdout);
-          const message = gbpNeedsVerificationMessage(parsed);
-          await supabase.from('weekly_posts')
-            .update({ status: 'needs_verification', error: message })
-            .eq('id', day1Post.id);
-          await log(runId, 'gbp', 'warn', `Day 1 GBP submitted but unverified after ${parsed.verificationAttempts || 5} snapshot checks. Not marking posted.`);
-          allOk = false;
-        } else {
-          await supabase.from('weekly_posts')
-            .update({ status: 'error', error: result.error })
-            .eq('id', day1Post.id);
-          await log(runId, 'gbp', 'error', `Day 1 GBP failed: ${result.error}`);
-          allOk = false;
-        }
-      }
-
-      // Mark Days 2-7 as scheduled (will be posted by daily cron job)
-      const laterPosts = gbpPosts.filter(p => p.day > 1);
-      if (laterPosts.length) {
-        await supabase.from('weekly_posts')
-          .update({ status: 'scheduled' })
-          .eq('run_id', runId).eq('platform', 'gbp').gt('day', 1);
-        // Weekly approval is one decision: propagate it to every day's workbook row
-        // so the daily poster's Approved-gate passes and Days 2-7 post on schedule.
-        const dateArgs = laterPosts
-          .map(p => p.post_date)
-          .filter(Boolean)
-          .flatMap(d => ['--date', d]);
-        if (dateArgs.length) {
-          const approveResult = await runPhase(runId, 'gbp', SEO_AGENTS_EXE, ['mark-gbp-approved', ...dateArgs], PROJECT_ROOT);
-          if (!approveResult.ok) {
-            await log(runId, 'gbp', 'warn', `mark-gbp-approved failed (Days 2-7 may block on poster gate): ${approveResult.error}`);
-          }
-        }
-        await log(runId, 'gbp', 'info', `Days 2-7 marked scheduled + approved in workbook for daily poster`);
-      }
+    if (gbpPosts?.length) {
+      await supabase.from('weekly_posts').update({ status: 'posting' })
+        .eq('run_id', runId).eq('platform', 'gbp').eq('status', 'approved');
+      await runGbpForApprovedRun({
+        runId, gbpPosts,
+        deps: { supabase, runPhase, log, env: process.env, projectRoot: PROJECT_ROOT, paths: GBP_PATHS },
+      });
     }
   }
 
@@ -605,60 +425,17 @@ async function poll() {
       }
     }
 
-    // ── Daily GBP poster ─────────────────────────
-    // Run once per calendar day after 9 AM Central. Derive the Central date/hour
-    // straight from the IANA tz (DST-aware) instead of a hardcoded UTC offset —
-    // the old `CDT_OFFSET = 5` was wrong all winter (CST is UTC-6) and silently
-    // shifted the daily post window by an hour.
-    const nowUtc = new Date();
-    const ctParts = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'America/Chicago', hour12: false,
-      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit',
-    }).formatToParts(nowUtc);
-    const ctp = (t) => ctParts.find((p) => p.type === t)?.value;
-    const todayDate = `${ctp('year')}-${ctp('month')}-${ctp('day')}`;
-    let cstHour = parseInt(ctp('hour'), 10);
-    if (cstHour === 24) cstHour = 0; // some ICU builds emit 24 at midnight
+    // ── Daily tick: once per calendar day after 9am Central ──
+    const { todayDate, cstHour } = centralDateHour(new Date());
     if (cstHour >= 9 && lastDailyGbpDate !== todayDate) {
       lastDailyGbpDate = todayDate;
-      const { data: todayGbp } = await supabase
-        .from('weekly_posts')
-        .select('id, run_id, post_date, photo_file')
-        .eq('platform', 'gbp')
-        .eq('status', 'scheduled')
-        .eq('post_date', todayDate)
-        .order('post_date', { ascending: true });
 
-      for (const post of todayGbp || []) {
-        console.log(`[mav-bridge][gbp-daily] Posting scheduled GBP for ${post.post_date}`);
-        const result = await runPhase(post.run_id, 'gbp', 'node', [GBP_POSTER_PATH, '--date', post.post_date], PROJECT_ROOT);
-        const parsed = parseDriverJson(result.stdout);
-        const gbpDailyOk = result.exitCode === 0;
-        if (gbpDailyOk) {
-          await supabase.from('weekly_posts')
-            .update({ status: 'posted', posted_at: new Date().toISOString(), platform_post_id: parsed.postUrl || null })
-            .eq('id', post.id);
-          console.log(`[mav-bridge][gbp-daily] Posted ${post.post_date} (exit ${result.exitCode})`);
-          await markGbpPostedAndArchive(post.post_date, result.exitCode, post.run_id);
-        } else if (result.exitCode === 3) {
-          const message = gbpNeedsVerificationMessage(parsed);
-          await supabase.from('weekly_posts')
-            .update({ status: 'needs_verification', error: message })
-            .eq('id', post.id);
-          console.warn(`[mav-bridge][gbp-daily] Submitted but unverified after ${parsed.verificationAttempts || 5} snapshot checks: ${post.post_date}`);
-        } else if (result.exitCode === 4) {
-          // Approval gate, not a failure: post is awaiting approval in the workbook.
-          // Park it as pending_approval so the workflow stays green and re-posts once approved.
-          await supabase.from('weekly_posts')
-            .update({ status: 'pending_approval', error: null })
-            .eq('id', post.id);
-          console.warn(`[mav-bridge][gbp-daily] ${post.post_date} not approved yet — parked as pending_approval`);
-        } else {
-          await supabase.from('weekly_posts')
-            .update({ status: 'error', error: (result.stderr || result.error || 'GBP poster failed').slice(0, 300) })
-            .eq('id', post.id);
-          console.error(`[mav-bridge][gbp-daily] Failed ${post.post_date}: ${result.error?.slice(0, 200)}`);
-        }
+      // GBP daily posting is owned by gbp-worker. Service only posts if MAV_BRIDGE_GBP=on.
+      if (GBP_ON) {
+        await runDailyGbp({
+          supabase, runPhase, log, env: process.env,
+          todayDate, gbpPosterPath: GBP_POSTER_PATH, projectRoot: PROJECT_ROOT,
+        });
       }
 
       // ── Facebook reconciliation ──────────────────
