@@ -892,6 +892,8 @@ async function handleHttpRequest(req, res) {
       const stuck = bucket === 'in_process' && isStuck(thresholdKey, row.updated_at);
       const status = stuck ? 'failed' : bucket;
       const status_detail = stuck ? 'stuck' : row.status;
+      const needsApproval = row.status === 'pending_approval' || row.status === 'awaiting_prompt';
+      const isApproved = row.status === 'approved';
       return {
         id: row.id,
         type,
@@ -907,8 +909,8 @@ async function handleHttpRequest(req, res) {
         error: row.error || null,
         executing_since: bucket === 'in_process' ? (row.updated_at || null) : null,
         updated_at: row.updated_at || row.created_at || null,
-        approval_required: bucket === 'pending',
-        approval: null,
+        approval_required: needsApproval,
+        approval: isApproved ? { approved: true, status: row.status } : null,
         live_adapter: 'mav-bridge',
         posts_count: type === 'seo_run' ? posts.filter(p => p.run_id === row.id).length : undefined,
       };
@@ -935,7 +937,7 @@ async function handleHttpRequest(req, res) {
       actions,
       alerts,
       summary: {
-        needs_approval: actions.filter(a => a.status === 'pending').length,
+        needs_approval: actions.filter(a => a.approval_required).length,
         in_process: actions.filter(a => a.status === 'in_process').length,
         completed: actions.filter(a => a.status === 'completed').length,
         failed: actions.filter(a => a.status === 'failed').length,
