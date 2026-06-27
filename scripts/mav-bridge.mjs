@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { createClient } from '@supabase/supabase-js';
 import xlsx from 'xlsx';
 import { checkFacebookToken } from './facebook-poster.mjs';
-import { mediaStatusFor } from './lib/action-enrich.mjs';
+import { mediaStatusFor, bucketStatus, isStuck, describeAction, agentFor } from './lib/action-enrich.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -803,42 +803,80 @@ async function handleHttpRequest(req, res) {
 
   // ── GET /seo/actions ────────────────────────
   if (method === 'GET' && url.pathname === '/seo/actions') {
+    const since48h = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+
     const [runsRes, postsRes, tasksRes] = await Promise.all([
-      supabase.from('seo_runs').select('*').eq('status', 'pending_approval').order('created_at').limit(10),
-      supabase.from('weekly_posts').select('*').in('status', ['pending_approval', 'error', 'needs_verification']).order('day').limit(50),
-      supabase.from('website_tasks').select('*').eq('status', 'pending_approval').order('priority').limit(20),
+      supabase.from('seo_runs').select('*')
+        .or(`status.in.(pending_approval,approved,awaiting_prompt,research_running,execute_running,executing,error),and(status.eq.done,done_at.gte.${since48h})`)
+        .order('created_at', { ascending: false }).limit(20),
+      supabase.from('weekly_posts').select('*')
+        .or(`status.in.(pending_approval,approved,scheduled,posting,error,needs_verification),and(status.eq.posted,posted_at.gte.${since48h})`)
+        .order('post_date', { ascending: true }).limit(60),
+      supabase.from('website_tasks').select('*')
+        .in('status', ['pending_approval', 'approved', 'executing', 'error'])
+        .order('priority').limit(20),
     ]);
+
     const runs = runsRes.data || [];
     const posts = postsRes.data || [];
     const tasks = tasksRes.data || [];
 
+    const enrich = (row, type) => {
+      const a = { ...row, type };
+      const bucket = bucketStatus(row.status);
+      const thresholdKey = type === 'seo_run' ? 'seo_run'
+        : type === 'website_task' ? 'website_task'
+        : (row.platform === 'facebook' ? 'weekly_post_facebook' : 'weekly_post_gbp');
+      const stuck = bucket === 'in_process' && isStuck(thresholdKey, row.updated_at);
+      const status = stuck ? 'failed' : bucket;
+      const status_detail = stuck ? 'stuck' : row.status;
+      return {
+        id: row.id,
+        type,
+        title: row.title || row.service || (type === 'seo_run' ? `SEO Run ${row.week_of || (row.id || '').slice(0, 8)}` : `${type} ${(row.id || '').slice(0, 8)}`),
+        description: describeAction(a, row.description),
+        priority: (row.priority || (type === 'seo_run' ? 'high' : 'medium')),
+        status,
+        status_detail,
+        assigned_agent: agentFor(a),
+        platform: row.platform || (type === 'website_task' ? 'website_cms' : type === 'seo_run' ? 'pipeline' : null),
+        media_status: type === 'weekly_post' ? (row.media_status || (row.status === 'posted' ? 'none' : 'n/a')) : 'n/a',
+        error: row.error || null,
+        executing_since: bucket === 'in_process' ? (row.updated_at || null) : null,
+        updated_at: row.updated_at || row.created_at || null,
+        approval_required: bucket === 'pending',
+        approval: null,
+        live_adapter: 'mav-bridge',
+        posts_count: type === 'seo_run' ? posts.filter(p => p.run_id === row.id).length : undefined,
+      };
+    };
+
     const actions = [
-      ...runs.map(r => ({
-        id: r.id,
-        type: 'seo_run',
-        status: 'needs_approval',
-        label: `SEO Run ${r.week_of || r.id?.slice(0, 8)}`,
-        approval_required: true,
-        approval: null,
-        live_adapter: 'mav-bridge',
-        posts_count: posts.filter(p => p.run_id === r.id).length,
-      })),
-      ...tasks.map(t => ({
-        id: t.id,
-        type: 'website_task',
-        status: 'needs_approval',
-        label: t.title || `Task ${t.id?.slice(0, 8)}`,
-        approval_required: true,
-        approval: null,
-        live_adapter: 'mav-bridge',
-      })),
+      ...runs.map(r => enrich(r, 'seo_run')),
+      ...posts.map(p => enrich(p, 'weekly_post')),
+      ...tasks.map(t => enrich(t, 'website_task')),
     ];
+
+    const alerts = actions
+      .filter(a => a.status === 'failed')
+      .map(a => ({
+        id: `${a.id}:${a.status_detail === 'stuck' ? 'stuck' : 'failed'}`,
+        severity: a.status_detail === 'stuck' ? 'warn' : 'error',
+        title: a.status_detail === 'stuck' ? `Stuck: ${a.title}` : `Failed: ${a.title}`,
+        detail: a.error || (a.status_detail === 'stuck' ? `In process longer than the ${a.type} limit.` : 'Action failed — check run logs.'),
+        action_id: a.id,
+        fault_type: a.status_detail === 'stuck' ? 'stuck' : 'failed',
+      }));
 
     sendJsonHttp(res, 200, {
       actions,
+      alerts,
       summary: {
-        needs_approval: runs.length + tasks.length,
-        blocked_access: posts.filter(p => ['error', 'needs_verification'].includes(p.status)).length,
+        needs_approval: actions.filter(a => a.status === 'pending').length,
+        in_process: actions.filter(a => a.status === 'in_process').length,
+        completed: actions.filter(a => a.status === 'completed').length,
+        failed: actions.filter(a => a.status === 'failed').length,
+        blocked_access: actions.filter(a => a.status === 'failed').length,
       },
     });
     return;
