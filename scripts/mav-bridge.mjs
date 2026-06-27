@@ -383,6 +383,22 @@ async function executeApprovedRun(run) {
 
   let allOk = true;
 
+  // ── 0. GBP photo curation (must run BEFORE Facebook) ───────────
+  // gbp-photo-pick discovers photos from the Drive-synced GBP Photos folder,
+  // scores + matches them to the schedule, copies winners to GBP_CURATED_FOLDER,
+  // and rewrites PHOTO_FILE. It must precede the Facebook phase: when a FB video
+  // day's Veo render fails, facebook-poster falls back to the same-date curated
+  // photo (curatedPhotoForDate), which only exists once this has run for the week.
+  const PHOTO_PICK_PATH = path.join(PROJECT_ROOT, 'scripts', 'gbp-photo-pick.mjs');
+  if (fs.existsSync(PHOTO_PICK_PATH)) {
+    const matchResult = await runPhase(runId, 'gbp', 'node', [PHOTO_PICK_PATH], PROJECT_ROOT);
+    if (!matchResult.ok) {
+      await log(runId, 'gbp', 'warn', `gbp-photo-pick failed (continuing): ${matchResult.error}`);
+    } else {
+      await log(runId, 'gbp', 'info', 'Photo curation complete (curated folder populated for GBP + FB fallback)');
+    }
+  }
+
   // ── 1. Facebook posts ──────────────────────────────────────────
   const { data: fbPosts } = await supabase
     .from('weekly_posts')
@@ -468,19 +484,7 @@ async function executeApprovedRun(run) {
       .update({ status: 'posting' })
       .eq('run_id', runId).eq('platform', 'gbp').eq('status', 'approved');
 
-    // Pick the best photo per GBP post and rewrite PHOTO_FILE before syncing to Excel.
-    // gbp-photo-pick.mjs is the single source of truth for GBP photos: it discovers
-    // from the Drive-synced GBP Photos folder, scores + matches, and copies winners
-    // to Curated. (Replaces the old photo-scanner → photo-matcher two-step.)
-    const PHOTO_PICK_PATH = path.join(PROJECT_ROOT, 'scripts', 'gbp-photo-pick.mjs');
-    if (fs.existsSync(PHOTO_PICK_PATH)) {
-      const matchResult = await runPhase(runId, 'gbp', 'node', [PHOTO_PICK_PATH], PROJECT_ROOT);
-      if (!matchResult.ok) {
-        await log(runId, 'gbp', 'warn', `gbp-photo-pick failed (continuing): ${matchResult.error}`);
-      } else {
-        await log(runId, 'gbp', 'info', 'Photo matching complete');
-      }
-    }
+    // (Photo curation already ran before the Facebook phase — see section 0.)
 
     // Sync posts to Excel workbook (reads updated PHOTO_FILE paths from schedule)
     const syncResult = await runPhase(runId, 'gbp', SEO_AGENTS_EXE, ['sync-gbp-schedule'], PROJECT_ROOT);
@@ -758,7 +762,10 @@ async function poll() {
         ...(faultTasks || []).map(t => checkRow(t, 'website_task', t.title || `Task ${(t.id || '').slice(0, 8)}`)),
       ]);
 
-      if (seeding) {
+      // Seal the baseline only if all three fault queries succeeded this pass. If
+      // any errored, the adopted set is incomplete — leave faultBaselineSeeded false
+      // so the next poll re-seeds rather than alerting on the rows we missed.
+      if (seeding && !faultRunsErr && !faultPostsErr && !faultTasksErr) {
         faultBaselineSeeded = true;
         const n = (faultRuns?.length || 0) + (faultPosts?.length || 0) + (faultTasks?.length || 0);
         console.log(`[mav-bridge][fault-detect] cold start: adopted ${n} existing fault(s) as baseline — no alerts sent. Only new faults will alert.`);
