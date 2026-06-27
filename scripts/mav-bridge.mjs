@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { createClient } from '@supabase/supabase-js';
 import xlsx from 'xlsx';
 import { checkFacebookToken } from './facebook-poster.mjs';
+import { mediaStatusFor } from './lib/action-enrich.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -394,6 +395,7 @@ async function executeApprovedRun(run) {
             await supabase.from('weekly_posts')
               .update({
                 status: postStatus,
+                media_status: mediaStatusFor(fbPost.type, r.media),
                 error: r.status === 'error' ? (r.message || 'Unknown error') : null,
                 posted_at: new Date().toISOString(),
                 platform_post_id: r.id || null,
