@@ -123,12 +123,14 @@ async function poll() {
     // 2. Daily poster: today's scheduled gbp rows, once/day >=9am Central.
     const { todayDate, cstHour } = centralDateHour(new Date());
     if (cstHour >= 9 && lastDailyGbpDate !== todayDate) {
-      lastDailyGbpDate = todayDate;
       await runDailyGbp({
         supabase, runPhase, log,
         env: process.env,
         todayDate, gbpPosterPath: GBP_POSTER_PATH, projectRoot: PROJECT_ROOT,
       });
+      // Mark the day done only after a successful run — a throw here lets the next
+      // poll retry today instead of silently skipping the day's posts.
+      lastDailyGbpDate = todayDate;
     }
   } catch (e) {
     console.error(`[gbp-worker][gbp-worker→poll][error] poll exception: ${e.message}`);
