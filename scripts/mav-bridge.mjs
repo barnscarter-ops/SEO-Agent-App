@@ -61,6 +61,14 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 fs.mkdirSync(path.join(PROJECT_ROOT, 'state'), { recursive: true });
 const alertStore = makeAlertStore(ALERTED_PATH);
+// Cold-start guard: if the dedup store is empty on boot, the first fault-detection
+// pass adopts whatever is already failed/stuck as a silent baseline instead of
+// firing an alert for every pre-existing fault at once. Only NEW faults after boot
+// alert. (Without this, a fresh deploy with N standing failures sends N texts.)
+const faultStoreWasEmpty = alertStore.isEmpty();
+let faultBaselineSeeded = false;
+// Never alert on faults older than this — stale historical failures are noise.
+const FAULT_RECENCY_MS = 24 * 60 * 60 * 1000;
 
 // ─────────────────────────────────────────────
 // Logging
@@ -702,28 +710,43 @@ async function poll() {
     // alert once (deduped). Recovered rows clear their dedup key so a future
     // recurrence re-alerts.
     try {
+      // Only consider recently-updated rows — never alert on stale historical faults.
+      const faultCutoff = new Date(Date.now() - FAULT_RECENCY_MS).toISOString();
       const { data: faultRuns, error: faultRunsErr } = await supabase.from('seo_runs')
-        .select('id,status,updated_at,error').in('status', ['error', 'executing']);
+        .select('id,status,updated_at,error').in('status', ['error', 'executing']).gte('updated_at', faultCutoff);
       const { data: faultPosts, error: faultPostsErr } = await supabase.from('weekly_posts')
-        .select('id,run_id,platform,status,updated_at,error,post_date').in('status', ['error', 'needs_verification', 'posting']);
+        .select('id,run_id,platform,status,updated_at,error,post_date').in('status', ['error', 'needs_verification', 'posting']).gte('updated_at', faultCutoff);
       const { data: faultTasks, error: faultTasksErr } = await supabase.from('website_tasks')
-        .select('id,run_id,status,updated_at,error,title').in('status', ['error', 'executing']);
+        .select('id,run_id,status,updated_at,error,title').in('status', ['error', 'executing']).gte('updated_at', faultCutoff);
       if (faultRunsErr || faultPostsErr || faultTasksErr) {
         console.warn(`[mav-bridge][fault-detect] query error: ${(faultRunsErr || faultPostsErr || faultTasksErr).message}`);
       }
 
+      // On a cold start (empty store) the first pass only records the baseline.
+      const seeding = faultStoreWasEmpty && !faultBaselineSeeded;
+
       const checkRow = async (row, thresholdKey, label) => {
         const b = bucketStatus(row.status);
-        if (b === 'failed') {
-          await notifyAlert({ runId: row.run_id || row.id, actionId: row.id, faultType: 'failed',
-            title: `Failed: ${label}`, detail: row.error || 'Action failed — check run logs.' });
-        } else if (b === 'in_process' && isStuck(thresholdKey, row.updated_at)) {
-          await notifyAlert({ runId: row.run_id || row.id, actionId: row.id, faultType: 'stuck',
-            title: `Stuck: ${label}`, detail: `In process longer than the ${thresholdKey} limit (since ${row.updated_at}).` });
-        } else {
+        const isFailed = b === 'failed';
+        const isStuckRow = b === 'in_process' && isStuck(thresholdKey, row.updated_at);
+        if (!isFailed && !isStuckRow) {
           // healthy now — clear both dedup keys so a recurrence re-alerts
           alertStore.clearFault(row.run_id || row.id, row.id, 'failed');
           alertStore.clearFault(row.run_id || row.id, row.id, 'stuck');
+          return;
+        }
+        const faultType = isFailed ? 'failed' : 'stuck';
+        if (seeding) {
+          // Adopt as baseline without alerting (avoids a cold-start alert blast).
+          alertStore.record(row.run_id || row.id, row.id, faultType);
+          return;
+        }
+        if (isFailed) {
+          await notifyAlert({ runId: row.run_id || row.id, actionId: row.id, faultType: 'failed',
+            title: `Failed: ${label}`, detail: row.error || 'Action failed — check run logs.' });
+        } else {
+          await notifyAlert({ runId: row.run_id || row.id, actionId: row.id, faultType: 'stuck',
+            title: `Stuck: ${label}`, detail: `In process longer than the ${thresholdKey} limit (since ${row.updated_at}).` });
         }
       };
 
@@ -734,6 +757,12 @@ async function poll() {
           `${p.platform} post ${p.post_date || ''}`.trim())),
         ...(faultTasks || []).map(t => checkRow(t, 'website_task', t.title || `Task ${(t.id || '').slice(0, 8)}`)),
       ]);
+
+      if (seeding) {
+        faultBaselineSeeded = true;
+        const n = (faultRuns?.length || 0) + (faultPosts?.length || 0) + (faultTasks?.length || 0);
+        console.log(`[mav-bridge][fault-detect] cold start: adopted ${n} existing fault(s) as baseline — no alerts sent. Only new faults will alert.`);
+      }
     } catch (e) {
       console.error(`[mav-bridge][fault-detect] ${e.message}`);
     }

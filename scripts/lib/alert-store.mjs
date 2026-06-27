@@ -29,5 +29,17 @@ export function makeAlertStore(filePath) {
       const set = load();
       if (set.delete(key(runId, actionId, faultType))) save(set);
     },
+    // True when no alert has ever been recorded — used to detect a cold start
+    // so the first poll can adopt existing faults as baseline (no alert blast).
+    isEmpty() {
+      return load().size === 0;
+    },
+    // Record a fault as already-known WITHOUT treating it as a fresh fire.
+    // Used for baseline seeding so pre-existing faults don't alert on first run.
+    record(runId, actionId, faultType) {
+      const set = load();
+      set.add(key(runId, actionId, faultType));
+      save(set);
+    },
   };
 }

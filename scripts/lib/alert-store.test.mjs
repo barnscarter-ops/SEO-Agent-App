@@ -22,5 +22,16 @@ assert.equal(store2.shouldFire('run1', 'act1', 'failed'), false);
 store2.clearFault('run1', 'act1', 'failed');
 assert.equal(store2.shouldFire('run1', 'act1', 'failed'), true);
 
+// cold-start detection: fresh store is empty, populated store is not
+const tmp2 = path.join(os.tmpdir(), `alerted-empty-${Date.now()}.json`);
+try { fs.rmSync(tmp2, { force: true }); } catch {}
+const fresh = makeAlertStore(tmp2);
+assert.equal(fresh.isEmpty(), true);
+// record() adopts a fault as baseline WITHOUT counting as a fresh fire
+fresh.record('runX', 'actX', 'failed');
+assert.equal(fresh.isEmpty(), false);
+assert.equal(fresh.shouldFire('runX', 'actX', 'failed'), false); // already known => no alert
+fs.rmSync(tmp2, { force: true });
+
 fs.rmSync(tmp, { force: true });
 console.log('ok alert-store');
