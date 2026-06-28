@@ -717,6 +717,24 @@ def archive_used_photos(schedule_path: Path, photo_dir: Path) -> list[str]:
     return archived
 
 
+# Shared day→topic binding rule. BOTH the GBP poster and Facebook crews consume
+# the same canonical ranked list (## RECOMMENDED POST TOPIC QUEUE in gbp_report.md)
+# and MUST bind day N to RANK N so the same topic lands on the same calendar day on
+# every platform. Defining it once keeps the two prompts from drifting apart — prompt
+# drift is exactly what caused the GBP/Facebook topic mismatch this rule prevents.
+DAY_TOPIC_BINDING_RULE = (
+    "DAY→TOPIC BINDING (MANDATORY — this is what keeps Google Business Profile and "
+    "Facebook in sync):\n"
+    "Use the '## RECOMMENDED POST TOPIC QUEUE' in the GBP REPORT as the single source "
+    "of truth for which topic goes on which day. Assign strictly in rank order:\n"
+    "  Day 1 = RANK 1 topic, Day 2 = RANK 2, Day 3 = RANK 3, ... Day 7 = RANK 7.\n"
+    "Do NOT reorder, swap, re-rank, or skip topics. The topic/SERVICE on a given day "
+    "number MUST be identical to the same day number on the other platform. Only the "
+    "post FORMAT (video/photo/text) and the copy may differ per platform — the topic "
+    "must not.\n"
+)
+
+
 def build_poster_crew(
     start_date: str = "",
     days: int = 7,
@@ -784,6 +802,7 @@ def build_poster_crew(
             f"{poster_context}\n\n"
             "The CONTENT REPORT and GBP REPORT above contain this week's trending electrical service queries "
             "and recommended post topics — use them directly. Do not search for additional trend data.\n\n"
+            f"{DAY_TOPIC_BINDING_RULE}\n"
             f"Build a {days}-day GBP posting schedule starting from {start_date or 'the next business day'}. "
             "For TREND_TIE, quote the specific trend signal from the GBP REPORT that drove each post's topic choice. "
             "CRITICAL: Only assign photos from the AVAILABLE PHOTOS list — never repeat a photo "
@@ -877,6 +896,7 @@ def build_facebook_crew(
         description=(
             f"{fb_context}\n\n"
             f"Build a {days}-day Facebook posting schedule starting from {start_date or 'the next business day'}.\n\n"
+            f"{DAY_TOPIC_BINDING_RULE}\n"
             "TONE RULES (mandatory):\n"
             "- HOOK must be the first line — make it impossible to scroll past (question, bold claim, or shocking stat)\n"
             "- BODY tells a mini-story (30-80 words). No bullet points. Conversational, local, real.\n"
