@@ -468,42 +468,55 @@ async function poll() {
       // FB Days 2–7 are scheduled on Facebook's own native scheduler at run time
       // (each row already carries a real FB post id). Facebook publishes them on
       // their dates; the bridge never posts FB daily. So once a scheduled FB row's
-      // date has passed, verify it actually published via the Graph API before
-      // marking it 'posted' — a scheduled post can fail or be deleted upstream of
-      // the bridge, and we don't want to lie about that in the dashboard.
+      // date has arrived (lte — we check today's post too, not just past days),
+      // verify it actually published via the Graph API before marking it 'posted'.
+      //
+      // Three outcomes per row, distinguished so the dashboard never lies and we
+      // never clobber a post that simply hasn't hit its publish minute yet:
+      //   - is_published === true   → mark 'posted'
+      //   - valid object, is_published === false → still pending; LEAVE as 'scheduled'
+      //                                 (re-checked on the next tick / next day)
+      //   - Graph error / not found → mark 'error' (deleted or rejected upstream)
+      //   - network throw           → leave unchanged (can't confirm either way)
       const { data: pastFb } = await supabase
         .from('weekly_posts')
         .select('id, post_date, platform_post_id')
         .eq('platform', 'facebook')
         .eq('status', 'scheduled')
-        .lt('post_date', todayDate);
+        .lte('post_date', todayDate);
       for (const post of pastFb || []) {
-        let verified = false;
         if (post.platform_post_id && FB_PAGE_ACCESS_TOKEN) {
           try {
             const checkRes = await fetch(
               `https://graph.facebook.com/${GRAPH_API_VERSION}/${post.platform_post_id}?fields=id,is_published&access_token=${encodeURIComponent(FB_PAGE_ACCESS_TOKEN)}`
             );
             const checkJson = await checkRes.json();
-            verified = !checkJson.error && checkJson.is_published !== false;
-          } catch {
-            // Network error — fall back to optimistic
-            verified = true;
+            if (checkJson.error) {
+              // Post object itself is gone/rejected — real failure.
+              await supabase.from('weekly_posts')
+                .update({ status: 'error', error: `Facebook reports: ${checkJson.error.message || JSON.stringify(checkJson.error)}` })
+                .eq('id', post.id);
+              console.log(`[mav-bridge][fb-reconcile] ${post.post_date} NOT found on Facebook — marked error`);
+            } else if (checkJson.is_published === false) {
+              // Scheduled but Facebook hasn't published it yet this second.
+              // Leave as 'scheduled' and let the next tick re-verify.
+              console.log(`[mav-bridge][fb-reconcile] ${post.post_date} not yet published — leaving scheduled`);
+            } else {
+              await supabase.from('weekly_posts')
+                .update({ status: 'posted', posted_at: new Date().toISOString() })
+                .eq('id', post.id);
+              console.log(`[mav-bridge][fb-reconcile] ${post.post_date} verified + marked posted`);
+            }
+          } catch (e) {
+            // Network error — can't confirm. Don't flip the row either way.
+            console.log(`[mav-bridge][fb-reconcile] ${post.post_date} verify failed (${e.message}) — leaving scheduled`);
           }
         } else {
-          // No post ID to verify — trust the schedule
-          verified = true;
-        }
-        if (verified) {
+          // No post ID / no token to verify — trust the schedule.
           await supabase.from('weekly_posts')
             .update({ status: 'posted', posted_at: new Date().toISOString() })
             .eq('id', post.id);
-          console.log(`[mav-bridge][fb-reconcile] ${post.post_date} verified + marked posted`);
-        } else {
-          await supabase.from('weekly_posts')
-            .update({ status: 'error', error: 'Scheduled post not found on Facebook — may have been deleted' })
-            .eq('id', post.id);
-          console.log(`[mav-bridge][fb-reconcile] ${post.post_date} NOT found on Facebook — marked error`);
+          console.log(`[mav-bridge][fb-reconcile] ${post.post_date} no platform_post_id — trusting schedule, marked posted`);
         }
       }
     }
