@@ -459,6 +459,28 @@ let geminiCreditsDepletedFlag = false;
 
 async function generateAllVideos(posts) {
   const videoPosts = posts.filter(p => p.type === 'video');
+  if (!videoPosts.length) return;
+
+  // Pre-flight: test Gemini availability with a tiny request before committing to
+  // the full generation loop. If credits are depleted, skip all videos upfront
+  // instead of letting each one fail individually (13 min timeout each).
+  const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
+  if (GEMINI_API_KEY) {
+    try {
+      const checkRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(GEMINI_API_KEY)}`
+      );
+      const checkJson = await checkRes.json();
+      if (checkJson.error?.status === 'RESOURCE_EXHAUSTED' || checkJson.error?.code === 429) {
+        hopLog('facebook-poster→gemini', 'warn', 'GEMINI PRE-FLIGHT: Credits depleted — skipping all video generation');
+        geminiCreditsDepletedFlag = true;
+        return;
+      }
+    } catch (e) {
+      hopLog('facebook-poster→gemini', 'warn', `Gemini pre-flight check failed (${e.message}) — will attempt videos anyway`);
+    }
+  }
+
   hopLog('facebook-poster', 'info', `Generating ${videoPosts.length} videos upfront...`);
   for (const post of videoPosts) {
     const videoPath = resolveVideoPath(post);
