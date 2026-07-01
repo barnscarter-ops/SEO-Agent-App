@@ -38,7 +38,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { normalizePhotoFile } from './lib/schedule-text.mjs';
+
+// heic-convert internally imports its own package.json, which Node ESM rejects
+// without an import attribute ("needs an import attribute of type: json").
+// Load it once via createRequire (CommonJS path) to sidestep that, so iPhone
+// HEIC photos — most of the library — actually get scored instead of silently
+// failing as 'heic-convert not installed'.
+const require = createRequire(import.meta.url);
+let heicConvert = null;
+try { const mod = require('heic-convert'); heicConvert = mod.default || mod; }
+catch { heicConvert = null; }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -193,12 +204,14 @@ async function scorePhoto(imagePath) {
   let mime = detectMime(imagePath, imageBuffer);
 
   if (ext === '.heic' || ext === '.heif') {
-    try {
-      const heicConvert = (await import('heic-convert')).default;
-      imageBuffer = Buffer.from(await heicConvert({ buffer: imageBuffer, format: 'JPEG', quality: 0.85 }));
-    } catch {
-      // heic-convert not installed — skip
+    if (!heicConvert) {
       return { score: 0, service_type: 'other', tags: [], reject_reason: 'heic-convert not installed' };
+    }
+    try {
+      imageBuffer = Buffer.from(await heicConvert({ buffer: imageBuffer, format: 'JPEG', quality: 0.85 }));
+      mime = 'image/jpeg'; // converted — must update so the data URL matches the buffer
+    } catch (e) {
+      return { score: 0, service_type: 'other', tags: [], reject_reason: `heic decode failed: ${e.message.slice(0, 60)}` };
     }
   } else if (ext === '.png') {
     mime = 'image/png';
