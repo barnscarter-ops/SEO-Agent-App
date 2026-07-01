@@ -345,31 +345,26 @@ async function graphPostPhoto(photoPath, caption, scheduleUnix) {
 }
 
 async function graphPostVideo(videoPath, caption, scheduleUnix) {
-  const fileSize = fs.statSync(videoPath).size;
-  const base = `https://graph-video.facebook.com/${GRAPH_API_VERSION}/${FB_PAGE_ID}/videos`;
-
-  // 1. start upload session
-  const startBody = new URLSearchParams({ upload_phase: 'start', file_size: String(fileSize), access_token: FB_PAGE_ACCESS_TOKEN });
-  const startJson = await graphParse('video start', await fetch(base, { method: 'POST', body: startBody }));
-  const { upload_session_id } = startJson;
-
-  // 2. transfer (single chunk — fine for short Veo clips, well under 1GB)
-  const chunkForm = new FormData();
-  chunkForm.append('upload_phase', 'transfer');
-  chunkForm.append('upload_session_id', upload_session_id);
-  chunkForm.append('start_offset', startJson.start_offset);
-  chunkForm.append('access_token', FB_PAGE_ACCESS_TOKEN);
-  chunkForm.append('video_file_chunk', new Blob([fs.readFileSync(videoPath)]), path.basename(videoPath));
-  await graphParse('video transfer', await fetch(base, { method: 'POST', body: chunkForm }));
-
-  // 3. finish
-  const finishBody = new URLSearchParams({
-    upload_phase: 'finish', upload_session_id, description: caption,
-    access_token: FB_PAGE_ACCESS_TOKEN, published: scheduleUnix ? 'false' : 'true',
-  });
-  if (scheduleUnix) finishBody.append('scheduled_publish_time', String(scheduleUnix));
-  const finishJson = await graphParse('video finish', await fetch(base, { method: 'POST', body: finishBody }));
-  return finishJson.id || upload_session_id;
+  // Single-request upload via multipart form. The older resumable/chunked
+  // (upload_phase start→transfer→finish) path returns {"success":true} with no
+  // video id on current Graph API versions — the video object is never created,
+  // so the post silently never appears. Short Veo clips (<1GB) upload fine in
+  // one request, and this path returns the actual video id.
+  const form = new FormData();
+  form.append('description', caption);
+  form.append('access_token', FB_PAGE_ACCESS_TOKEN);
+  form.append('file_type', 'video/mp4');
+  form.append('source', new Blob([fs.readFileSync(videoPath)], { type: 'video/mp4' }), path.basename(videoPath));
+  if (scheduleUnix) {
+    form.append('published', 'false');
+    form.append('scheduled_publish_time', String(scheduleUnix));
+  } else {
+    form.append('published', 'true');
+  }
+  const url = `https://graph-video.facebook.com/${GRAPH_API_VERSION}/${FB_PAGE_ID}/videos`;
+  const json = await graphParse('video upload', await fetch(url, { method: 'POST', body: form }));
+  if (!json.id) throw new Error(`Video upload returned no id: ${JSON.stringify(json)}`);
+  return json.id;
 }
 
 // Dispatch one post over the Graph API, with token-expiry retry around the whole op.

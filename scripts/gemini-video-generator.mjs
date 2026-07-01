@@ -23,7 +23,9 @@ if (fs.existsSync(envPath)) {
 }
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-const VEO_MODEL = process.env.GEMINI_VEO_MODEL || 'veo-3.0-generate-001';
+// Veo 3.0 (veo-3.0-generate-001) is deprecated and returns 404. Default to the
+// current Veo 3.1 preview. Override with GEMINI_VEO_MODEL if needed.
+const VEO_MODEL = process.env.GEMINI_VEO_MODEL || 'veo-3.1-generate-preview';
 const POLL_INTERVAL_MS = 8000;
 // Veo 3 can take 10-12 minutes for some prompts. 90 polls × 8s = 720s (12 min)
 // so generation doesn't time out prematurely and fall back to a static image.
