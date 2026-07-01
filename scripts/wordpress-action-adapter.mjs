@@ -248,6 +248,30 @@ function wpRestAuth() {
   return "Basic " + Buffer.from(user + ":" + pass).toString("base64");
 }
 
+async function ensureWpSession(config) {
+  const auth = wpRestAuth();
+  const url = normalizeBaseUrl(config.site_url) + "/wp-json/wp/v2/users/me?_fields=id,name";
+  try {
+    const res = await fetch(url, {
+      headers: { "Authorization": auth, "Content-Type": "application/json" }
+    });
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`WordPress auth failed (${res.status}). Check WP_USERNAME and WP_APP_PASSWORD in .env.`);
+    }
+    if (!res.ok) {
+      throw new Error(`WordPress REST /users/me returned ${res.status}`);
+    }
+    return true;
+  } catch (e) {
+    console.error(JSON.stringify({
+      adapter: "wordpress-action-adapter",
+      status: "auth_error",
+      message: e.message
+    }));
+    throw e;
+  }
+}
+
 async function wpRest(baseUrl, method, endpoint, body) {
   const url = normalizeBaseUrl(baseUrl) + "/wp-json/wp/v2/" + endpoint;
   const options = {
@@ -375,6 +399,8 @@ async function restContentAction(config, action, live) {
   }
 
   // Live execution
+  await ensureWpSession(config);
+
   if (isPost && !action.page_id && !action.slug) {
     const result = await wpRest(config.site_url, "POST", "posts", body);
     return {
