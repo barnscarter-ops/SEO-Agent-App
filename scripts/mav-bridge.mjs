@@ -303,6 +303,12 @@ async function executeApprovedRun(run) {
           const postResults = parsed?.results || [];
           const dayMap = new Map(postResults.map(r => [r.day, r]));
 
+          const fallbacks = postResults.filter(r => r.fallback);
+          if (fallbacks.length) {
+            const summary = fallbacks.map(r => `Day ${r.day}: ${r.fallback}`).join(', ');
+            await log(runId, 'facebook', 'warn', `FALLBACK: ${summary}`);
+          }
+
           if (parsed?.gemini_credits_depleted) {
             await log(runId, 'facebook', 'warn', 'GEMINI_CREDITS_DEPLETED: Video days posted as photos. Top up at https://aistudio.google.com/');
             await sendBridgeAlert(

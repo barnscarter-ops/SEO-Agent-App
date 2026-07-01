@@ -357,21 +357,25 @@ async function graphPostVideo(videoPath, caption, scheduleUnix) {
 }
 
 // Dispatch one post over the Graph API, with token-expiry retry around the whole op.
-// Returns { id, media } where media is 'video' | 'photo' | 'text' — what actually went out.
+// Returns { id, media, fallback } where media is 'video' | 'photo' | 'text' — what actually
+// went out — and fallback is null unless the intended media type could not be honored
+// (e.g. 'video→photo', 'video→text', 'photo→text').
 async function graphDispatch(post, caption, videoPath, scheduleUnix) {
   return withTokenRetry(`day ${post.day ?? '?'} (${post.type})`, async () => {
     if (post.type === 'video' && videoPath && fs.existsSync(videoPath)) {
       hopLog('facebook-poster→graph', 'info', `Uploading video (${(fs.statSync(videoPath).size / 1e6).toFixed(1)} MB)`);
-      return { id: await graphPostVideo(videoPath, caption, scheduleUnix), media: 'video' };
+      return { id: await graphPostVideo(videoPath, caption, scheduleUnix), media: 'video', fallback: null };
     }
     const fullPhotoPath = resolvePhotoPath(post);
     if (fullPhotoPath) {
-      if (post.type === 'video') hopLog('facebook-poster→graph', 'info', `Video unavailable — falling back to photo: ${path.basename(fullPhotoPath)}`);
+      const fallback = post.type === 'video' ? 'video→photo' : null;
+      if (fallback) hopLog('facebook-poster→graph', 'info', `Video unavailable — falling back to photo: ${path.basename(fullPhotoPath)}`);
       else hopLog('facebook-poster→graph', 'info', `Uploading photo: ${path.basename(fullPhotoPath)}`);
-      return { id: await graphPostPhoto(fullPhotoPath, caption, scheduleUnix), media: 'photo' };
+      return { id: await graphPostPhoto(fullPhotoPath, caption, scheduleUnix), media: 'photo', fallback };
     }
+    const fallback = post.type === 'video' ? 'video→text' : post.photo_file ? 'photo→text' : null;
     if (post.photo_file) hopLog('facebook-poster→graph', 'warn', `Photo not found: ${post.photo_file} — posting as text`);
-    return { id: await graphPostText(caption, scheduleUnix), media: 'text' };
+    return { id: await graphPostText(caption, scheduleUnix), media: 'text', fallback };
   });
 }
 
@@ -801,6 +805,7 @@ async function runSinglePayload(args) {
   }
 
   let postId = null;
+  let postFallback = null;
   let via;
   if (USE_PLAYWRIGHT) {
     via = 'playwright';
@@ -815,13 +820,15 @@ async function runSinglePayload(args) {
     if (!FB_PAGE_ID || !FB_PAGE_ACCESS_TOKEN) {
       throw new Error('FB_PAGE_ID and FB_PAGE_ACCESS_TOKEN must be set in .env (or set FB_USE_PLAYWRIGHT=1)');
     }
-    ({ id: postId } = await graphDispatch(post, caption, videoPath, null));
+    ({ id: postId, fallback: postFallback } = await graphDispatch(post, caption, videoPath, null));
+    if (postFallback) hopLog('facebook-poster→graph', 'warn', `FALLBACK: ${postFallback}`);
   }
 
   return {
     status: 'success', adapter: 'facebook-poster', via, action_id: action.id || null, post_type: type,
     post_id: postId, date: post.date || post.day || null, headline: post.headline || null,
     fb_post_url: postId ? `https://www.facebook.com/${String(postId).replace('_', '/posts/')}` : null,
+    fallback: postFallback,
   };
 }
 
@@ -893,14 +900,15 @@ async function runWeek(args) {
       const isLive = (post.day === 1 && !args.scheduleAll) || rawScheduleUnix < nowUnix + 600;
       const scheduleUnix = isLive ? null : rawScheduleUnix;
       try {
-        const { id, media } = await graphDispatch(post, caption, post._videoPath || null, scheduleUnix);
+        const { id, media, fallback } = await graphDispatch(post, caption, post._videoPath || null, scheduleUnix);
         if (isLive) {
-          results.push({ day: post.day, date: post.date, status: 'posted', type: post.type, media, id });
+          results.push({ day: post.day, date: post.date, status: 'posted', type: post.type, media, id, fallback });
           hopLog('facebook-poster→graph', 'info', `Day ${post.day} posted live (id: ${id}, media: ${media})`);
         } else {
-          results.push({ day: post.day, date: post.date, status: 'scheduled', scheduled_time: `${post.date} ${args.postTime}`, type: post.type, media, id });
+          results.push({ day: post.day, date: post.date, status: 'scheduled', scheduled_time: `${post.date} ${args.postTime}`, type: post.type, media, id, fallback });
           hopLog('facebook-poster→graph', 'info', `Day ${post.day} scheduled for ${post.date} ${args.postTime} (id: ${id}, media: ${media})`);
         }
+        if (fallback) hopLog('facebook-poster→graph', 'warn', `Day ${post.day} FALLBACK: ${fallback}`);
       } catch (e) {
         results.push({ day: post.day, date: post.date, status: 'error', message: e.message });
         hopLog('facebook-poster→graph', 'error', `Day ${post.day} failed: ${e.message}`);
