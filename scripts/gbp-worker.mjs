@@ -108,16 +108,25 @@ async function poll() {
     if (approved?.length) {
       // Process the earliest run_id only (mirrors mav-bridge's one-run-per-poll).
       const runId = approved[0].run_id;
-      const gbpPosts = approved.filter(p => p.run_id === runId);
-      // Claim BEFORE running so a concurrent poll can't double-process.
-      await supabase.from('weekly_posts').update({ status: 'posting' })
-        .eq('run_id', runId).eq('platform', 'gbp').eq('status', 'approved');
-      await log(runId, 'gbp', 'info', `Claimed ${gbpPosts.length} gbp post(s) for run ${String(runId).slice(0, 8)}`);
-      await runGbpForApprovedRun({
-        runId,
-        gbpPosts,
-        deps: { supabase, runPhase, log, env: process.env, projectRoot: PROJECT_ROOT, paths },
-      });
+      // Claim BEFORE running so a concurrent poll (or mav-bridge's GBP_ON path)
+      // can't double-process. Atomic CAS on status='approved' — only rows still
+      // 'approved' at claim time are returned; a race loses and gets zero rows.
+      const { data: claimed, error: claimErr } = await supabase.from('weekly_posts')
+        .update({ status: 'posting' })
+        .eq('run_id', runId).eq('platform', 'gbp').eq('status', 'approved')
+        .select('id');
+      if (claimErr || !claimed?.length) {
+        await log(runId, 'gbp', 'warn', `GBP claim race: ${claimErr?.message || 'no rows claimed'} — another worker may own these`);
+      } else {
+        await log(runId, 'gbp', 'info', `Claimed ${claimed.length} gbp post(s) for run ${String(runId).slice(0, 8)}`);
+        const claimedIds = new Set(claimed.map(c => c.id));
+        const gbpPosts = approved.filter(p => p.run_id === runId && claimedIds.has(p.id));
+        await runGbpForApprovedRun({
+          runId,
+          gbpPosts,
+          deps: { supabase, runPhase, log, env: process.env, projectRoot: PROJECT_ROOT, paths },
+        });
+      }
     }
 
     // 2. Daily poster: today's scheduled gbp rows, once/day >=9am Central.

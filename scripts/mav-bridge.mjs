@@ -359,12 +359,21 @@ async function executeApprovedRun(run) {
       .from('weekly_posts').select('*')
       .eq('run_id', runId).eq('platform', 'gbp').eq('status', 'approved');
     if (gbpPosts?.length) {
-      await supabase.from('weekly_posts').update({ status: 'posting' })
-        .eq('run_id', runId).eq('platform', 'gbp').eq('status', 'approved');
-      await runGbpForApprovedRun({
-        runId, gbpPosts,
-        deps: { supabase, runPhase, log, env: process.env, projectRoot: PROJECT_ROOT, paths: GBP_PATHS },
-      });
+      // Atomic CAS on status='approved' — if gbp-worker claimed these rows first,
+      // this update matches zero rows and we skip instead of double-posting.
+      const { data: claimed } = await supabase.from('weekly_posts')
+        .update({ status: 'posting' })
+        .eq('run_id', runId).eq('platform', 'gbp').eq('status', 'approved')
+        .select('id');
+      if (!claimed?.length) {
+        await log(runId, 'gbp', 'info', 'GBP rows already claimed by gbp-worker — skipping');
+      } else {
+        const claimedIds = new Set(claimed.map(c => c.id));
+        await runGbpForApprovedRun({
+          runId, gbpPosts: gbpPosts.filter(p => claimedIds.has(p.id)),
+          deps: { supabase, runPhase, log, env: process.env, projectRoot: PROJECT_ROOT, paths: GBP_PATHS },
+        });
+      }
     }
   }
 
