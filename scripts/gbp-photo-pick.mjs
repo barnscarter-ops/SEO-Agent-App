@@ -44,16 +44,30 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 
 // ── Load .env ──────────────────────────────────────────────────────────────
+// FORCE-OVERRIDE: a Windows User env var OPENAI_API_KEY=sk-carter-gateway-coding-local
+// is a local-gateway placeholder that returns 401 from real OpenAI. The "don't
+// clobber existing env" pattern let that leak through and silently broke GPT-4o
+// photo scoring. .env wins, mirroring run-weekly-seo.py's intentional override.
 const envPath = path.join(PROJECT_ROOT, '.env');
 if (fs.existsSync(envPath)) {
   for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
     const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim();
+    if (m) process.env[m[1]] = m[2].trim();
   }
 }
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const PHOTOS_FOLDER = process.env.GBP_PHOTOS_FOLDER || 'H:\\My Drive\\GBP Photos';
+// DRIVE_FOLDER is the Google Drive mount — the primary source you add new job
+// photos to (phone → Drive). It is only accessible while the Google Drive
+// desktop app is running, which is NOT guaranteed at the Friday 8:30 run time.
+// LOCAL_CACHE is an always-available mirror that syncFromDrive() keeps fresh.
+// Discovery reads from LOCAL_CACHE so the picker never starves when Drive is
+// down — it just uses the last-synced library (172 photos) instead of silently
+// failing or falling back to a stale 33-photo subset.
+const DRIVE_FOLDER = process.env.GBP_PHOTOS_FOLDER || 'H:\\My Drive\\GBP Photos';
+const LOCAL_CACHE = process.env.GBP_PHOTOS_LOCAL_CACHE
+  || 'C:\\Workspace\\Shared\\Assets\\Media\\Grizzly\\GBP Post Photos';
+const PHOTOS_FOLDER = LOCAL_CACHE; // what discovery actually scans
 const CURATED_FOLDER = process.env.GBP_CURATED_FOLDER || 'E:\\Media\\Grizzly\\Curated';
 const CACHE_FILE = process.env.GBP_PHOTO_CACHE || path.join(PROJECT_ROOT, 'state', 'photo-cache.json');
 const SCHEDULE_FILE = path.join(PROJECT_ROOT, 'outputs', 'gbp_posting_schedule.md');
@@ -62,6 +76,7 @@ const SUPPORTED_EXTS = new Set(['.jpg', '.jpeg', '.png', '.heic', '.heif', '.web
 
 const dryRun = process.argv.includes('--dry-run');
 const rescan = process.argv.includes('--rescan');
+const noSync = process.argv.includes('--no-sync');
 
 // ── Cache helpers ──────────────────────────────────────────────────────────
 
@@ -73,6 +88,46 @@ function loadCache() {
 function saveCache(cache) {
   fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
   fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
+}
+
+// ── Drive → local cache sync ───────────────────────────────────────────────
+// Copies any photo in the Google Drive folder that isn't already in the local
+// cache (by filename + size). This is the "weekly import": new photos you drop
+// in Drive get mirrored to the always-available local folder so the picker can
+// see them even when the Drive desktop app isn't running at run time.
+//
+// Safe by design: it only ADDS/updates files in LOCAL_CACHE; it never deletes
+// (a Drive hiccup shouldn't wipe the cache). Returns { synced, skipped, driveMounted }.
+function syncFromDrive() {
+  const result = { synced: 0, skipped: 0, updated: 0, driveMounted: fs.existsSync(DRIVE_FOLDER) };
+  if (!result.driveMounted) return result;
+  fs.mkdirSync(LOCAL_CACHE, { recursive: true });
+  const driveFiles = fs.readdirSync(DRIVE_FOLDER, { recursive: true, withFileTypes: false })
+    .map(f => path.join(DRIVE_FOLDER, f.toString()))
+    .filter(f => {
+      try {
+        if (!fs.statSync(f).isFile()) return false;
+        const ext = path.extname(f).toLowerCase();
+        if (SUPPORTED_EXTS.has(ext)) return true;
+        if (ext === '') return isLikelyImage(f);
+        return false;
+      } catch { return false; }
+    });
+
+  for (const src of driveFiles) {
+    const name = path.basename(src);
+    const dest = path.join(LOCAL_CACHE, name);
+    try {
+      const srcSize = fs.statSync(src).size;
+      if (fs.existsSync(dest) && fs.statSync(dest).size === srcSize) {
+        result.skipped++;
+        continue;
+      }
+      fs.copyFileSync(src, dest);
+      fs.existsSync(dest) ? result.updated++ : result.synced++;
+    } catch { /* skip unreadable file */ }
+  }
+  return result;
 }
 
 // ── Schedule parser ────────────────────────────────────────────────────────
@@ -327,14 +382,33 @@ async function main() {
 
   if (!fs.existsSync(PHOTOS_FOLDER)) {
     console.error(`Photos folder not found: ${PHOTOS_FOLDER}`);
-    console.error(`Add photos to that folder or set GBP_PHOTOS_FOLDER in .env`);
+    console.error(`Add photos to that folder or set GBP_PHOTOS_LOCAL_CACHE in .env`);
     process.exit(1);
   }
 
   console.log(`\n=== GBP Weekly Photo Pick ===`);
-  console.log(`Source: ${PHOTOS_FOLDER}`);
+  console.log(`Source (local cache): ${PHOTOS_FOLDER}`);
+  console.log(`Drive source:        ${DRIVE_FOLDER}`);
   console.log(`Curated: ${CURATED_FOLDER}`);
   if (dryRun) console.log('(dry run — no files will be copied)\n');
+
+  // ── Step 0: Sync Drive → local cache (weekly import) ─────────────────────
+  // New photos added to the Google Drive folder since the last run get mirrored
+  // into the local cache so the picker sees the full library. Skipped silently
+  // (--no-sync) or when Drive isn't mounted; the picker then uses the last sync.
+  if (!noSync) {
+    const sync = syncFromDrive();
+    if (!sync.driveMounted) {
+      console.log(`Drive not mounted (${DRIVE_FOLDER}) — using existing local cache only.`);
+      console.log(`To pull new photos, open Google Drive and re-run, or run: node scripts/gbp-photo-pick.mjs --no-sync\n`);
+    } else {
+      const parts = [];
+      if (sync.synced) parts.push(`${sync.synced} new`);
+      if (sync.updated) parts.push(`${sync.updated} updated`);
+      parts.push(`${sync.skipped} unchanged`);
+      console.log(`Drive sync: ${parts.join(', ')}${(sync.synced + sync.updated) === 0 ? ' (already up to date)' : ''}\n`);
+    }
+  }
 
   // ── Step 1: Discover photos ──────────────────────────────────────────────
   const allFiles = discoverPhotos(PHOTOS_FOLDER);
